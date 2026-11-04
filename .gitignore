@@ -1,0 +1,46 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Generated output, logs, run state (out/ holds logs, last-run markers, backups, sample mails, review CSV)
+out/
+*.log
+*.eml
+
+# Raw inventory dumps (hold colleagues' email addresses; regenerate with scripts/d1_inventory.py)
+docs/d1_inventory.json
+docs/d1_inventory.md
+docs/d1b_findings.json
+
+# Python caches and environments
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Build output and backups
+*.exe
+build/
+dist/
+*.spec
+*.bak
+*.orig
+
+# Editor and tool settings
+.vscode/
+.claude/
+
+# Superseded early-phase notes (kept on disk, not in git)
+docs/T3_mapping_proposal.*
+docs/TIMELINE*.md
+docs/customsql_mapping_proposal.*
+docs/d1_unresolved.md
+docs/d1b_findings.md
+docs/status_update_manager.md
+
+# Local substitution map for scripts/make_public_copy.py (holds the real internal values)
+publish_map.local.json
+
+# Dev-only test data scripts (not deployable)
+testdata/
