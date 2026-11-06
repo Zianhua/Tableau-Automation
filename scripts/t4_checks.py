@@ -139,7 +139,6 @@ def rows(cur, prefix=LIKE):
 
 def cleanup(cur):
     cur.execute("DELETE FROM Integration.Tableau_RefreshJob WHERE DataSource_id LIKE 'T4TEST-%'")
-    cur.execute("DELETE FROM Integration.Tableau_Priority WHERE Item_id LIKE 'T4TEST-%'")
 
 
 def others_checksum(cur):
@@ -331,8 +330,8 @@ def test_flow(cur):
           tab.submitted == [] and s["lookup_failed"] == 1 and m.exit_code(s) == 1)
 
 
-def test_priority(cur):
-    """D-062: marked extracts refresh first (lowest number first); unmarked ones follow in name order."""
+def test_run_order(cur):
+    """Extracts refresh in name order."""
     today = m.dwh_today(cur)
     P = "CQGlobalSGDW: A"
     e = {P: (sgt_now() - dt.timedelta(minutes=5), True)}
@@ -343,16 +342,8 @@ def test_priority(cur):
         cur.execute(cleanup_jobs)
         tab = FakeTableau()
         run_once(cur, tab, [target(i, [P]) for i in reversed(ids)], today, e=e)
-        check("priority: " + label, tab.submitted == want, str(tab.submitted))
-    order("no marks -> by name", ids)
-    ins = "INSERT INTO Integration.Tableau_Priority (Kind, Item_id, Priority) VALUES ('Extract', ?, ?)"
-    cur.execute(ins, "T4TEST-PC", 1)
-    order("one mark goes first, the rest by name", ["T4TEST-PC", "T4TEST-PA", "T4TEST-PB", "T4TEST-PD"])
-    cur.execute(ins, "T4TEST-PD", 0)
-    cur.execute(ins, "T4TEST-PB", 1)
-    order("lower number first, equal numbers by name", ["T4TEST-PD", "T4TEST-PB", "T4TEST-PC", "T4TEST-PA"])
-    cur.execute("INSERT INTO Integration.Tableau_Priority (Kind, Item_id, Priority) VALUES ('Subscription', 'T4TEST-PA', 0)")
-    order("a Subscription mark does not rank an extract", ["T4TEST-PD", "T4TEST-PB", "T4TEST-PC", "T4TEST-PA"])
+        check("run order: " + label, tab.submitted == want, str(tab.submitted))
+    order("by name", ids)
     cleanup(cur)
 
 
@@ -536,7 +527,7 @@ def main():
     try:
         test_real_reads(cur)
         test_flow(cur)
-        test_priority(cur)
+        test_run_order(cur)
         test_tableau_busy(cur)
         test_exclusion_reasons()
     finally:

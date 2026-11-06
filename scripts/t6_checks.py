@@ -138,7 +138,6 @@ def others_checksum(cur):
 
 
 def cleanup(cur):
-    cur.execute("DELETE FROM Integration.Tableau_Priority WHERE Item_id LIKE ?", LIKE)
     cur.execute("DELETE FROM Integration.Tableau_SubscriptionBackup WHERE Subscription_id LIKE ?", LIKE)
     cur.execute("DELETE FROM Integration.Tableau_SubscriptionSendLog WHERE Subscription_id LIKE ?", LIKE)
     cur.execute("DELETE FROM Integration.Tableau_Subscription WHERE Subscription_id LIKE ?", LIKE)
@@ -199,21 +198,12 @@ def test_render_as_subscriber():
 
 
 def test_send_order(cur):
-    """D-062: marked subscriptions are loaded first (lowest number first); unmarked ones keep the usual order."""
+    """Subscriptions are loaded in the usual order (workbook, subject); nothing is lost."""
     for sid in ("T6TEST-OA", "T6TEST-OB", "T6TEST-OC"):
         add_sub(cur, sid)
     ids = lambda: [x.id for x in m.load_subscriptions(cur, id_like="T6TEST-O%")]
     base = ids()
-    check("send order: no marks -> the usual order, nothing lost", sorted(base) == ["T6TEST-OA", "T6TEST-OB", "T6TEST-OC"], str(base))
-    ins = "INSERT INTO Integration.Tableau_Priority (Kind, Item_id, Priority) VALUES ('Subscription', ?, ?)"
-    last = base[-1]
-    cur.execute(ins, last, 1)
-    check("send order: a marked subscription goes first, the rest keep their order", ids() == [last] + base[:-1], str(ids()))
-    cur.execute(ins, base[0], 0)
-    check("send order: lower number first", ids()[:2] == [base[0], last], str(ids()))
-    cur.execute("DELETE FROM Integration.Tableau_Priority WHERE Item_id LIKE 'T6TEST-O%'")
-    cur.execute("INSERT INTO Integration.Tableau_Priority (Kind, Item_id, Priority) VALUES ('Extract', ?, 0)", last)
-    check("send order: an Extract mark does not rank a subscription", ids() == base, str(ids()))
+    check("send order: the usual order, nothing lost", sorted(base) == ["T6TEST-OA", "T6TEST-OB", "T6TEST-OC"], str(base))
     cleanup(cur)
 
 
@@ -300,7 +290,7 @@ def test_gate():
     check("gate: unknown source kind -> blocked",
           kinds(mk_gate(sources={"w": [{"id": "d1", "name": "", "status": "Ready", "kind": "Unknown", "target": None}]})) == (False, "blocked"))
     check("gate: nothing to gate on at all -> blocked",
-          kinds(mk_gate(pipes={}, sources={"w": [{"id": "d1", "name": "", "status": "NoReadinessCheck", "kind": "Live", "target": None}]}))
+          kinds(mk_gate(pipes={}, sources={"w": [{"id": "d1", "name": "", "status": "Ready", "kind": "Live", "target": None}]}))
           == (False, "blocked"))
     file_src = {"id": "d2", "name": "", "status": "NotChecked", "kind": "Live", "target": None}
     check("gate (D-053): a workbook with only a NotChecked (file) source is ready, nothing to wait for",
@@ -317,10 +307,6 @@ def test_gate():
           kinds(mk_gate(pipes={}, etl={}, sources={"w": [dict(file_src, status="NoTables")]})) == (False, "blocked"))
     check("gate (D-053): file source + unmapped DWH source (workbook NotReady) is blocked",
           kinds(mk_gate(wb={"w": ("NotReady", 2)}, sources=two)) == (False, "blocked"))
-    check("gate: readiness NoReadinessCheck on one source, ETL ok on another -> ready",
-          kinds(mk_gate(wb={"w": ("Ready", 2)}, sources={"w": [
-              {"id": "d1", "name": "", "status": "Ready", "kind": "Live", "target": None},
-              {"id": "d2", "name": "", "status": "NoReadinessCheck", "kind": "Live", "target": None}]})) == (True, "ready"))
 
 
 # ---------- SMTP classification ----------

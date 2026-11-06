@@ -17,6 +17,7 @@ Script-driven refresh and delivery of Tableau reports that use several extracts,
 - [docs/LIMITATIONS.md](docs/LIMITATIONS.md): known limits and assumptions
 - [docs/DB_CHANGES.md](docs/DB_CHANGES.md): every database change, in the order to apply it, with permissions and the dev-only test changes (for the DBA)
 - [docs/DEPLOYMENT_PLAN.md](docs/DEPLOYMENT_PLAN.md): step-by-step deployment to the server, staged rollout, monitoring, what is not tested yet
+- [docs/DEPLOYMENT_UAT.md](docs/DEPLOYMENT_UAT.md): the UAT-only walk-through on the host (<UAT_DWH_SERVER>, tableau-uat)
 - [docs/PROD_PREFLIGHT.md](docs/PROD_PREFLIGHT.md): read-only production checks before go-live
 
 Suggested reading order for deployment: PROD_PREFLIGHT, DB_CHANGES, DEPLOYMENT_PLAN, then RUNBOOK.

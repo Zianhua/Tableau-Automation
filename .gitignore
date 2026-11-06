@@ -44,3 +44,7 @@ publish_map.local.json
 
 # Dev-only test data scripts (not deployable)
 testdata/
+
+# Office lock files and scratch
+~$*
+*.tmp

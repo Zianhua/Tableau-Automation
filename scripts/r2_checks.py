@@ -546,38 +546,6 @@ def test_review3(cur, today):
     check("ADDR_HASH_SALT warning exists when unset, none when set", ops.salt_warning({}) and ops.salt_warning({"ADDR_HASH_SALT": "x"}) is None)
     check("T2 holds the PAT lock at most T2_MAX_LOCK_MIN (default 10) and the holder allowance matches (+5)",
           m2.T2_MAX_LOCK_MIN == 10 and ops.holder_allowance_min("t2", {}) == 15 and ops.holder_allowance_min("t2", {"T2_MAX_LOCK_MIN": "3"}) == 8)
-    # ---- R3: send-log delete guard
-    c6.cleanup(cur)
-    cur.execute("EXEC sp_set_session_context N'allow_fixture_delete', 1")
-    c6.add_sub(cur, "T6TEST-D1")
-    cur.execute("INSERT Integration.Tableau_SubscriptionSendLog (Subscription_id, Status, SentAt, Message) VALUES ('T6TEST-D1', 'Sent', SYSDATETIMEOFFSET(), 'x')")
-
-    def delete_err(sql, *a):
-        try:
-            cur.execute(sql, *a)
-            return ""
-        except Exception as e:
-            return str(e)
-    cur.execute("EXEC sp_set_session_context N'allow_fixture_delete', 0")
-    e1 = delete_err("DELETE FROM Integration.Tableau_SubscriptionSendLog WHERE Subscription_id = 'T6TEST-D1'")
-    n1 = cur.execute("SELECT COUNT(*) FROM Integration.Tableau_SubscriptionSendLog WHERE Subscription_id = 'T6TEST-D1'").fetchone()[0]
-    check("R3: deleting a Sent row (which would free the slot) is refused without the fixture flag", "50007" in e1 and n1 == 1, e1[:80])
-    cur.execute("EXEC sp_set_session_context N'allow_fixture_delete', 1")
-    e2 = delete_err("DELETE FROM Integration.Tableau_SubscriptionSendLog WHERE Subscription_id = 'T6TEST-D1'")
-    check("R3: ... allowed for a fixture subscription id when the test session sets the flag", e2 == "" and cur.execute(
-        "SELECT COUNT(*) FROM Integration.Tableau_SubscriptionSendLog WHERE Subscription_id = 'T6TEST-D1'").fetchone()[0] == 0)
-    cur.execute("INSERT Integration.Tableau_Subscription (Subscription_id, Workbook_id, TargetType, TargetId, Format, Subject, Active_Flag) "
-                "VALUES ('ZZNOFIX-1', 'ZZWB', 'Workbook', 'ZZT', 'PDF', 's', 0)")
-    cur.execute("INSERT Integration.Tableau_SubscriptionSendLog (Subscription_id, Status, Message) VALUES ('ZZNOFIX-1', 'TimedOut', 'x')")
-    e3 = delete_err("DELETE FROM Integration.Tableau_SubscriptionSendLog WHERE Subscription_id = 'ZZNOFIX-1'")
-    check("R3: a NON-fixture TimedOut row cannot be deleted even with the flag", "50007" in e3)
-    cur.execute("UPDATE Integration.Tableau_SubscriptionSendLog SET Status = 'Released' WHERE Subscription_id = 'ZZNOFIX-1'")
-    cur.execute("EXEC sp_set_session_context N'allow_fixture_delete', 0")
-    e4 = delete_err("DELETE FROM Integration.Tableau_SubscriptionSendLog WHERE Subscription_id = 'ZZNOFIX-1'")
-    check("R3: after releasing it (RUNBOOK procedure) the row can be deleted without any flag", e4 == "")
-    cur.execute("DELETE FROM Integration.Tableau_Subscription WHERE Subscription_id = 'ZZNOFIX-1'")
-    cur.execute("EXEC sp_set_session_context N'allow_fixture_delete', 1")
-    check("R3 DDL and rollback files exist", all((ROOT / "scripts" / "sql" / f).exists() for f in ("R3_sendlog_guard.sql", "R3_sendlog_guard_rollback.sql")))
     check("T1 rollback refuses while takeover rows are open", "THROW 50006" in (ROOT / "scripts" / "sql" / "T1_mapping_schema_rollback.sql").read_text(encoding="utf-8"))
     c6.cleanup(cur)
     # ---- probe matches the PUBLISHED name

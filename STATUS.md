@@ -1,11 +1,11 @@
 # Status
 
-Last updated: 2026-11-03 (evening) by the PM session, housekeeping pass. The handoff log below is current and kept intact.
+Last updated: 2026-11-04 by the removal worker (D-081); earlier: 2026-11-03 (evening) PM housekeeping pass. The handoff log below is current and kept intact.
 
 **Phase:** build complete and reviewed. Dry-run preparation was finished on 2026-11-03. Next: clear the open items, run the user's own tests, then wrap up testing and prepare the implementation (production deployment). Nothing has run on production. Nothing since commit 879b36a (2026-10-26) is committed.
 
 **Done**
-- Whole build, reviewed: mapping schema and registry, daily mapping sync (including custom SQL), gated extract refresh with wait and log, schedule-aware send with a once-per-day send log, auto-pause and restore of taken-over subscriptions, operations (kill switch, watchdog, daily summary, Event Log signal, run order, load limits), scheduler script, runbook, deployment documents. Decisions D-001 to D-065 in DECISIONS.md.
+- Whole build, reviewed: mapping schema and registry, daily mapping sync (including custom SQL), gated extract refresh with wait and log, schedule-aware send with a once-per-day send log, auto-pause and restore of taken-over subscriptions, operations (kill switch, watchdog, daily summary, Event Log signal, run order by name, load limits), scheduler script, runbook, deployment documents. Decisions D-001 to D-065 in DECISIONS.md.
 - Dry-run preparation, 2026-11-03: the daily mapping sync ran (4 in-scope workbooks, 5 subscriptions, 4 suspended). Three extracts were refreshed for real on UAT and all succeeded. The export dry run works (CFD Accounts and Daily T+0 Report x2 would send; Weekly T+0 Failure Report deferred, the 25-minute budget ran out; Weekly NOVA Multi-Asset is not taken over).
 - Slow exports accepted (D-064): Daily T+0 Report takes 12 to 13 minutes per export.
 - Reports are exported as the subscriber with the shared admin account (D-063), proven on UAT with a normal user.
@@ -37,6 +37,8 @@ Last updated: 2026-11-03 (evening) by the PM session, housekeeping pass. The han
 
 ## Handoff log
 Newest first. One line per entry: date, session purpose, what changed.
+
+- 2026-11-04, removal worker (D-081), owner decision: took the override table, the run-order table and view, and the two static/registry triggers out of the solution (SQL files R9_priority and its rollback deleted; T1 schema, R8 and their rollbacks, T1 tests edited; run order is by name; readiness has no NoReadinessCheck status). The daily mapping sync now checks for a table in both the static list and the registry and mails an alert (static_registry_clash); t2_checks tests it. Dev DWH: both dropped tables had 0 rows; objects dropped, remaining SQL files re-run clean. Docs updated (DB_CHANGES_DETAIL, DEPLOYMENT_PLAN, PROD_PREFLIGHT, RUNBOOK, LIMITATIONS, BACKLOG, DECISIONS D-081). All 8 checks files pass one at a time (t2 with --no-rerun). Not run: the real sync (needs the Tableau token), so the alert wiring in the sync itself is untested beyond a syntax check. Not committed.
 
 - 2026-11-04, extract takeover worker (D-080), owner decisions: (1) the schedule's enabled or disabled state is never looked at, for extract tasks and subscriptions alike (removed the skip in extract_takeover.py, the 'schedule suspended' result in schedule_due.py and its uses in t4, t6, t11, review_list, extract_tasks and the sync log line); (2) the takeover switches the old refresh job off (`Active_Flag = 0` in `Integration.ETL_Tableau_ExtractMapping`, only rows that were 1, same transaction as the backup row) and `--restore` switches exactly those rows back (new backup columns `OldJobMappingIds`, `OldJobOriginalFlag`, `OldJobSwitchedAt`, `OldJobRestoredAt`, applied on dev); (3) registry unchanged (incremental); docs: DB_CHANGES permissions in one place, RUNBOOK section 21 "How to switch the extract takeover on", the three owner-own objects reworded. All 8 checks files pass. Nothing run against Tableau; the takeover was never run for real.
 

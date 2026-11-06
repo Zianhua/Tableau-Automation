@@ -531,16 +531,3 @@ def on_pat_busy(script, execute, ses=False, cfg=None, mailer=None, local_host="1
 
 def pat_ok(script, env=os.environ):
     note_streak(script, False, env)
-
-
-def priorities(cur, kind):
-    """{item id: priority} from Integration.Tableau_Priority (R9, D-062); lower goes first. {} when nothing is marked or the
-    table is not deployed yet, so the order falls back to by name."""
-    if cur.execute("SELECT OBJECT_ID('Integration.Tableau_Priority')").fetchone()[0] is None:
-        return {}
-    return {i: p for i, p in cur.execute("SELECT Item_id, Priority FROM Integration.Tableau_Priority WHERE Kind = ?", kind).fetchall()}
-
-
-def priority_key(prio, item_id, name):
-    """Sort key: marked items first (lowest number first), then everything else; name order within each group."""
-    return (prio.get(item_id, 2 ** 31), (name or "").lower())

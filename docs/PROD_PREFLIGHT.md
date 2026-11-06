@@ -12,7 +12,7 @@ Ground rules
 
 Why it matters: the scripts refuse to run unless the server and database match the warehouse guard. The guard is in these places (details: docs/DB_CHANGES.md section 4); none needs a code change, only values:
 - Python: the keys `DEV_DWH_SERVER` and `DEV_DWH_DATABASE` in `.env` (read by `scripts/t2_mapping_sync.py` and `scripts/t4_refresh.py`; the other scripts call `t4_refresh.connect()`). `CONN_SERVER` / `CONN_DATABASE` must equal them (case-insensitive), and after connecting `@@SERVERNAME` must start with the first label of `DEV_DWH_SERVER`. On production the operator puts the production values in these keys (the names say DEV).
-- SQL: every file in `scripts/sql/` (19 deployable files) has the literal `IF DB_NAME() <> 'CQGlobalSGDW' OR UPPER(@@SERVERNAME) NOT IN ('<DEV_DWH_SERVER>') ... SET NOEXEC ON` on line 3: one search-and-replace of the server name, not in `T1_tests.sql`. `extract_checks.py` and `t11_checks.py` assert that name and need the same edit.
+- SQL: every file in `scripts/sql/` (17 deployable files) has the literal `IF DB_NAME() <> 'CQGlobalSGDW' OR UPPER(@@SERVERNAME) NOT IN ('<DEV_DWH_SERVER>') ... SET NOEXEC ON` on line 3: one search-and-replace of the server name, not in `T1_tests.sql`. `extract_checks.py` and `t11_checks.py` assert that name and need the same edit.
 
 Run on the production DWH (read-only):
 ```sql

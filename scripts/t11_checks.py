@@ -269,7 +269,7 @@ def test_structural():
              ("source list short", c6.mk_gate(wb={"w": ("Ready", 2)})),
              ("extract without target", c6.mk_gate(sources={"w": [{"id": "d1", "name": "", "status": "Ready", "kind": "Extract", "target": None}]})),
              ("unknown kind", c6.mk_gate(sources={"w": [{"id": "d1", "name": "", "status": "Ready", "kind": "Unknown", "target": None}]})),
-             ("nothing to gate", c6.mk_gate(pipes={}, sources={"w": [{"id": "d1", "name": "", "status": "NoReadinessCheck", "kind": "Live", "target": None}]}))]
+             ("nothing to gate", c6.mk_gate(pipes={}, sources={"w": [{"id": "d1", "name": "", "status": "Ready", "kind": "Live", "target": None}]}))]
     ok = True
     for name, g in pairs:
         s_ok = g.structural("w")[0]
@@ -675,69 +675,6 @@ def test_r5(cur, today):
               retake_restored=False, max_mapping_age_h=26.0, owner_user_id=None, max_new=None, allow_restore_after_send=True)
     check("F-4: the override is a command line flag (--allow-restore-after-send)", m.build_config(flag, {}).allow_restore_after_send is True
           and "--allow-restore-after-send" in open(m.__file__, encoding="utf-8").read())
-    test_sql_files()
-
-
-def test_sql_files():
-    """R4 (F-5) and R5 SQL, run for real on the dev DWH inside ONE transaction that is rolled back at the end (DDL is transactional)."""
-    sqldir = Path(__file__).resolve().parent / "sql"
-    for f in ("R4_takeover_all.sql", "R4_takeover_all_rollback.sql", "R5_workbook_updated_at.sql", "R5_workbook_updated_at_rollback.sql"):
-        t = (sqldir / f).read_text(encoding="utf-8")
-        head = t.split("\nGO", 1)[0]
-        check("F-5: %s starts with the dev-server guard (RAISERROR + SET NOEXEC ON) and ends with SET NOEXEC OFF" % f,
-              "<DEV_DWH_SERVER>" in head and "SET NOEXEC ON" in head and t.rstrip().endswith("SET NOEXEC OFF;\nGO"))
-    r4 = (sqldir / "R4_takeover_all.sql").read_text(encoding="utf-8")
-    check("F-5: R4 refuses with RAISERROR + SET NOEXEC ON (not a lone THROW) and drops default constraints",
-          "THROW" not in r4.split("*/", 1)[1] and r4.count("SET NOEXEC ON") >= 2 and "sys.default_constraints" in r4)
-    conn = t4.connect()
-    conn.autocommit = False
-    c = conn.cursor()
-    T = "Integration.Tableau_SubscriptionBackup"
-    col = lambda: c.execute("SELECT COL_LENGTH('%s', 'WasSuspended')" % T).fetchone()[0] is not None
-    chk = lambda: c.execute("SELECT COUNT(*) FROM sys.check_constraints WHERE name = 'CK_Tableau_SubscriptionBackup_NotPreSuspended' "
-                            "AND parent_object_id = OBJECT_ID('%s')" % T).fetchone()[0] == 1
-    dflt = lambda: c.execute("SELECT COUNT(*) FROM sys.default_constraints WHERE parent_object_id = OBJECT_ID('%s') AND parent_column_id = "
-                             "COLUMNPROPERTY(OBJECT_ID('%s'), 'WasSuspended', 'ColumnId')" % (T, T)).fetchone()[0]
-    ins = ("INSERT %s (Subscription_id, Workbook_id, TargetType, TargetId, OwnerUserId, AttachPdf, AttachImage, TakenOver, WasSuspended) "
-           "VALUES ('T11TEST-R4', 'w', 'Workbook', 't', 'u', 1, 0, 0, 1)" % T)
-    before = col()
-    try:
-        errs = run_sql_file(c, "R4_takeover_all_rollback.sql")
-        check("F-5 rollback: re-adds WasSuspended with a default and the CHECK; no error", errs == [] and col() and chk() and dflt() == 1, str(errs)[:120])
-        errs = run_sql_file(c, "R4_takeover_all_rollback.sql")
-        check("F-5 rollback is idempotent", errs == [] and col() and chk() and dflt() == 1)
-        c.execute(ins)
-        errs = run_sql_file(c, "R4_takeover_all.sql")
-        check("F-5 R4 with a row WasSuspended = 1: refuses AND STOPS (column and CHECK both still there; NOEXEC skipped the later batches)",
-              any("WasSuspended = 1" in e for e in errs) and col() and chk() and dflt() == 1, str(errs)[:120])
-        check("F-5 ... and the session is usable again afterwards (SET NOEXEC OFF ran)", c.execute("SELECT 1").fetchone()[0] == 1)
-        c.execute("DELETE FROM %s WHERE Subscription_id = 'T11TEST-R4'" % T)
-        errs = run_sql_file(c, "R4_takeover_all.sql")
-        check("F-5 R4 on a clean table: drops the CHECK, the DEFAULT and the column", errs == [] and not col() and not chk() and dflt() == 0, str(errs)[:120])
-        errs = run_sql_file(c, "R4_takeover_all.sql")
-        check("F-5 R4 is idempotent (second run: no error, nothing to do)", errs == [] and not col() and not chk())
-        # the original column may have had a default with a SYSTEM-generated name
-        run_sql_file(c, "R4_takeover_all_rollback.sql")
-        c.execute("ALTER TABLE %s DROP CONSTRAINT DF_Tableau_SubscriptionBackup_WasSuspended" % T)
-        c.execute("ALTER TABLE %s ADD DEFAULT 0 FOR WasSuspended" % T)
-        sysname = c.execute("SELECT TOP 1 name FROM sys.default_constraints WHERE parent_object_id = OBJECT_ID('%s') AND parent_column_id = "
-                            "COLUMNPROPERTY(OBJECT_ID('%s'), 'WasSuspended', 'ColumnId')" % (T, T)).fetchone()[0]
-        errs = run_sql_file(c, "R4_takeover_all.sql")
-        check("F-5 R4 handles a default constraint with a system-generated name (%s...): column dropped" % sysname[:14],
-              errs == [] and not col() and dflt() == 0, str(errs)[:120])
-        has = lambda: c.execute("SELECT COL_LENGTH('Integration.Tableau_Subscription', 'WorkbookUpdatedAt')").fetchone()[0] is not None
-        errs = run_sql_file(c, "R5_workbook_updated_at_rollback.sql")
-        check("R5 rollback drops Tableau_Subscription.WorkbookUpdatedAt", errs == [] and not has(), str(errs)[:120])
-        errs = run_sql_file(c, "R5_workbook_updated_at.sql")
-        errs2 = run_sql_file(c, "R5_workbook_updated_at.sql")
-        check("R5 adds the column, idempotent", errs == [] and errs2 == [] and has())
-    finally:
-        conn.rollback()
-        conn.close()
-    c2 = t4.connect().cursor()
-    check("the transaction was rolled back: the dev tables are as they were before the SQL tests",
-          (c2.execute("SELECT COL_LENGTH('%s', 'WasSuspended')" % T).fetchone()[0] is not None) == before
-          and c2.execute("SELECT COL_LENGTH('Integration.Tableau_Subscription', 'WorkbookUpdatedAt')").fetchone()[0] is not None)
 
 
 def test_t4_counts_takeover(cur, today):

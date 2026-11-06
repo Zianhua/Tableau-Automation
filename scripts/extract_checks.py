@@ -1206,8 +1206,8 @@ def test_config():
 
 def test_sql_files():
     root = Path(__file__).resolve().parent / "sql"
-    up, down = (root / "ExtractAuto_schema.sql").read_text(encoding="utf-8"), (root / "ExtractAuto_schema_rollback.sql").read_text(encoding="utf-8")
-    check("SQL files carry the dev-server guard like the others", all("<DEV_DWH_SERVER>" in x and "SET NOEXEC ON" in x for x in (up, down)))
+    down = (root / "ExtractAuto_schema_rollback.sql").read_text(encoding="utf-8")
+    check("the rollback file carries the dev-server guard like the others", "<DEV_DWH_SERVER>" in down and "SET NOEXEC ON" in down)
     c = txn()
     try:
         c.cursor().execute("DELETE FROM Integration.Tableau_ExtractTaskBackup")   # inside this transaction only (rolled back): the test does not depend on real rows

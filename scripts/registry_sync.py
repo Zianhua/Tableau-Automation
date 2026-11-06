@@ -212,6 +212,15 @@ def stored_tables(cur):
         "JOIN Integration.Tableau_DataSource ds ON dst.DataSource_id IN (ds.DataSource_id, ds.UpstreamDataSourceId) WHERE ds.Active_Flag = 1")}
 
 
+def static_clashes(cur):
+    """Tables that are in BOTH Tableau_StaticTable and Tableau_PipelineTable (ambiguous: need a check or not?), as 'Schema.Table'.
+    Read-only. Replaces the two database triggers that used to refuse such a row (D-081)."""
+    return ["%s.%s" % (r[0], r[1]) for r in cur.execute(
+        "SELECT DISTINCT s.SchemaName, s.TableName FROM Integration.Tableau_StaticTable s "
+        "JOIN Integration.Tableau_PipelineTable p ON p.SchemaName = s.SchemaName AND p.TableName = s.TableName "
+        "ORDER BY s.SchemaName, s.TableName")]
+
+
 def derive(cur, tables):
     defaults, registry, static = load_inputs(cur)
     entries, problems = read_entries(cur, defaults)

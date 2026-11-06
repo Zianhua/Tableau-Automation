@@ -11,8 +11,7 @@ SELECT ds.DataSource_id,
        ds.Active_Flag,
        ds.RefreshKind,
        ds.ExtractRefreshTargetId,
-       CASE WHEN o.DataSource_id IS NOT NULL       THEN 'NoReadinessCheck'
-            WHEN ds.RefreshKind = 'Unknown'        THEN 'UnknownKind'
+       CASE WHEN ds.RefreshKind = 'Unknown'        THEN 'UnknownKind'
             WHEN ISNULL(c.TableCount, 0) = 0       THEN 'NoTables'
             WHEN c.UnmappedCount > 0               THEN 'UnmappedTable'
             WHEN ISNULL(pl.UnknownCount, 0) > 0    THEN 'UnknownPipeline'
@@ -22,8 +21,6 @@ SELECT ds.DataSource_id,
        ISNULL(pl.PipelineCount, 0)                 AS RequiredPipelineCount,
        pl.RequiredPipelines
 FROM Integration.Tableau_DataSource AS ds
-LEFT JOIN Integration.Tableau_DataSourceOverride AS o
-       ON o.DataSource_id = ds.DataSource_id AND o.NoReadinessCheck = 1
 LEFT JOIN (SELECT DataSource_id,
                   COUNT(*) AS TableCount,
                   SUM(CASE WHEN IsStatic = 0 AND IsRegistered = 0 THEN 1 ELSE 0 END) AS UnmappedCount
@@ -56,11 +53,11 @@ WITH wb AS (
 SELECT Workbook_id,
        CASE WHEN COUNT(DataSource_id) = 0 THEN 'NoDataSources'
             WHEN SUM(CASE WHEN DataSource_id IS NOT NULL AND ReadyStatus IS NULL THEN 1 ELSE 0 END) > 0 THEN 'InactiveDataSource'
-            WHEN SUM(CASE WHEN ReadyStatus NOT IN ('Ready','NoReadinessCheck') THEN 1 ELSE 0 END) > 0 THEN 'NotReady'
+            WHEN SUM(CASE WHEN ReadyStatus NOT IN ('Ready') THEN 1 ELSE 0 END) > 0 THEN 'NotReady'
             ELSE 'Ready' END AS WorkbookStatus,
        COUNT(DataSource_id) AS DataSourceCount,
        SUM(CASE WHEN DataSource_id IS NOT NULL AND ReadyStatus IS NULL THEN 1 ELSE 0 END) AS InactiveCount,
-       SUM(CASE WHEN ReadyStatus NOT IN ('Ready','NoReadinessCheck') THEN 1 ELSE 0 END) AS NotReadyCount
+       SUM(CASE WHEN ReadyStatus NOT IN ('Ready') THEN 1 ELSE 0 END) AS NotReadyCount
 FROM links
 GROUP BY Workbook_id;
 GO

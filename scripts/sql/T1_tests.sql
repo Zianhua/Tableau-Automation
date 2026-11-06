@@ -4,11 +4,10 @@ IF DB_NAME() <> 'CQGlobalSGDW' OR UPPER(@@SERVERNAME) NOT IN ('<DEV_DWH_SERVER>'
 GO
 /*
 T1 tests. Dev DWH only. Test rows are all named TEST-* / TESTSCH and are deleted at the start and at the end
-(no outer transaction: the Sent trigger and the static/registry triggers raise errors on purpose).
-Results are returned as the last result set. Needs T1_mapping_schema.sql and T3_load_registry.sql.
+(no outer transaction: some cases raise errors on purpose).
+Results are returned as the last result set. Needs the mapping objects (DBJR document, ITSC_384043_TableauEnhancement_ML) and T3_load_registry.sql.
 The two-session claim race is in T1_concurrency_test.ps1.
-NOTE (2026-10-26): since the R3 send-log delete guard this script can no longer clean up its own 'Sent' test row in the send-log part, so
-do NOT run it again on a database that matters; the readiness cases R8a..R8h at the top of it are also covered by r1_checks.py (rolled back, no send log).
+The readiness cases R8a..R8h at the top of it are also covered by r1_checks.py (rolled back, no send log).
 */
 SET NOCOUNT ON;
 DECLARE @r TABLE (Test varchar(70), Passed bit, Detail nvarchar(400));
@@ -20,7 +19,6 @@ DELETE FROM Integration.Tableau_Subscription WHERE Subscription_id LIKE 'TEST-%'
 DELETE FROM Integration.Tableau_RefreshJob WHERE DataSource_id LIKE 'TEST-%';
 DELETE FROM Integration.Tableau_WorkbookDataSource WHERE Workbook_id LIKE 'TEST-%';
 DELETE FROM Integration.Tableau_DataSourceTable WHERE DataSource_id LIKE 'TEST-%';
-DELETE FROM Integration.Tableau_DataSourceOverride WHERE DataSource_id LIKE 'TEST-%';
 DELETE FROM Integration.Tableau_DataSource WHERE DataSource_id LIKE 'TEST-%';
 DELETE FROM Integration.Tableau_PipelineTable WHERE SchemaName = 'TESTSCH';
 DELETE FROM Integration.Tableau_StaticTable WHERE SchemaName = 'TESTSCH';
@@ -35,8 +33,6 @@ BEGIN TRY
       ('TEST-ready',     'two pipelines',        NULL, 1, 1),
       ('TEST-static',    'static + registered',  NULL, 1, 1),
       ('TEST-onlystatic','only static',          NULL, 1, 1),
-      ('TEST-override',  'override, no tables',  NULL, 1, 1),
-      ('TEST-ovr0',      'override=0 ignored',   NULL, 1, 1),
       ('TEST-pub',       'published extract',    NULL, 1, 1),
       ('TEST-emb',       'embedded -> published','TEST-pub', 1, 1),
       ('TEST-unknown',   'IsExtract NULL',       NULL, NULL, 1),
@@ -56,14 +52,11 @@ BEGIN TRY
       ('TEST-ready','Dimension','AE'), ('TEST-ready','Fact','DailyNovaTradeVolume'),
       ('TEST-static','dbo','SalesChannel_Excel'), ('TEST-static','Dimension','AE'),
       ('TEST-onlystatic','dbo','SalesChannel_Excel'),
-      ('TEST-ovr0','dbo','TestNotInRegistry'),
       ('TEST-pub','Dimension','Client'),
       ('TEST-unknown','Dimension','AE'),
       ('TEST-live','Dimension','AE'),
       ('TEST-badpipe','TESTSCH','T1'),
       ('TEST-inactive','Dimension','AE');
-    INSERT Integration.Tableau_DataSourceOverride (DataSource_id, NoReadinessCheck, Reason, SetBy) VALUES
-      ('TEST-override',1,'test','test'), ('TEST-ovr0',0,'test','test');
 
     DECLARE @s TABLE (id nvarchar(128), st varchar(20), np int, pl nvarchar(400), kind varchar(10), tgt nvarchar(128));
     INSERT @s SELECT DataSource_id, ReadyStatus, RequiredPipelineCount, RequiredPipelines, RefreshKind, ExtractRefreshTargetId
@@ -75,7 +68,6 @@ BEGIN TRY
         AND pl='CQGlobalSGDW: DailyETL|CQGlobalSGDW: NovaDailyETL' THEN 1 ELSE 0 END, st+' | '+ISNULL(pl,'NULL') FROM @s WHERE id='TEST-ready';
     INSERT @r SELECT '4a static table does not block', CASE WHEN st='Ready' AND np=1 AND pl='CQGlobalSGDW: DailyETL' THEN 1 ELSE 0 END, st+' | '+ISNULL(pl,'NULL') FROM @s WHERE id='TEST-static';
     INSERT @r SELECT '4b only-static source Ready, 0 pipelines', CASE WHEN st='Ready' AND np=0 THEN 1 ELSE 0 END, st FROM @s WHERE id='TEST-onlystatic';
-    INSERT @r SELECT '4c override=1 -> NoReadinessCheck', CASE WHEN st='NoReadinessCheck' THEN 1 ELSE 0 END, st FROM @s WHERE id='TEST-override';
     INSERT @r SELECT '4d embedded uses published tables', CASE WHEN st='Ready' AND pl='CQGlobalSGDW: DailyETL' THEN 1 ELSE 0 END, st+' | '+ISNULL(pl,'NULL') FROM @s WHERE id='TEST-emb';
     INSERT @r SELECT '4e refresh target dedupe (embedded + published)', CASE WHEN COUNT(DISTINCT tgt)=1 AND MIN(tgt)='TEST-pub' THEN 1 ELSE 0 END, ISNULL(MIN(tgt),'NULL') FROM @s WHERE id IN ('TEST-pub','TEST-emb');
     INSERT @r SELECT 'M1a IsExtract NULL -> Unknown, not Ready, no target', CASE WHEN kind='Unknown' AND st='UnknownKind' AND tgt IS NULL THEN 1 ELSE 0 END, kind+' | '+st FROM @s WHERE id='TEST-unknown';
@@ -84,7 +76,6 @@ BEGIN TRY
     INSERT @r SELECT 'M2a pipeline not in ETL_Master_Log -> UnknownPipeline', CASE WHEN st='UnknownPipeline' THEN 1 ELSE 0 END, st FROM @s WHERE id='TEST-badpipe';
     INSERT @r SELECT 'M2b real pipelines are PipelineKnown', CASE WHEN COUNT(*)>0 AND MIN(CAST(PipelineKnown AS int))=1 THEN 1 ELSE 0 END, CONCAT(COUNT(*),' rows')
         FROM Integration.vw_Tableau_DataSourcePipeline WHERE DataSource_id='TEST-ready';
-    INSERT @r SELECT 'N NoReadinessCheck=0 override is ignored', CASE WHEN st='UnmappedTable' THEN 1 ELSE 0 END, st FROM @s WHERE id='TEST-ovr0';
     INSERT @r SELECT 'R8a flagged file source, no DWH table -> NotChecked', CASE WHEN st='NotChecked' AND np=0 THEN 1 ELSE 0 END, st FROM @s WHERE id='TEST-file';
     INSERT @r SELECT 'R8b file + mapped DWH table -> Ready (that pipeline only)', CASE WHEN st='Ready' AND pl='CQGlobalSGDW: DailyETL' THEN 1 ELSE 0 END, st+' | '+ISNULL(pl,'NULL') FROM @s WHERE id='TEST-filedwh';
     INSERT @r SELECT 'R8c file + unmapped DWH table -> UnmappedTable', CASE WHEN st='UnmappedTable' THEN 1 ELSE 0 END, st FROM @s WHERE id='TEST-fileunm';
@@ -96,7 +87,7 @@ BEGIN TRY
     INSERT Integration.Tableau_Subscription (Subscription_id, Workbook_id, TargetType, TargetId, Format)
         VALUES ('TEST-sub-nods','TEST-wb-nods','Workbook','TEST-wb-nods','PDF');
     INSERT Integration.Tableau_WorkbookDataSource (Workbook_id, Workbook_Name, DataSource_id) VALUES
-      ('TEST-wb-ready','w','TEST-ready'), ('TEST-wb-ready','w','TEST-static'), ('TEST-wb-ready','w','TEST-override'),
+      ('TEST-wb-ready','w','TEST-ready'), ('TEST-wb-ready','w','TEST-static'),
       ('TEST-wb-notready','w','TEST-ready'), ('TEST-wb-notready','w','TEST-unmapped'),
       ('TEST-wb-inactive','w','TEST-ready'), ('TEST-wb-inactive','w','TEST-inactive'),
       ('TEST-wb-unknown','w','TEST-ready'), ('TEST-wb-unknown','w','TEST-unknown'),
@@ -107,7 +98,7 @@ BEGIN TRY
     DECLARE @w TABLE (id nvarchar(128), st varchar(20));
     INSERT @w SELECT Workbook_id, WorkbookStatus FROM Integration.vw_Tableau_WorkbookReadiness WHERE Workbook_id LIKE 'TEST-%';
     INSERT @r SELECT 'H4b workbook with no data sources -> NoDataSources', CASE WHEN st='NoDataSources' THEN 1 ELSE 0 END, st FROM @w WHERE id='TEST-wb-nods';
-    INSERT @r SELECT 'H4c all sources Ready/override -> Ready', CASE WHEN st='Ready' THEN 1 ELSE 0 END, st FROM @w WHERE id='TEST-wb-ready';
+    INSERT @r SELECT 'H4c all sources Ready -> Ready', CASE WHEN st='Ready' THEN 1 ELSE 0 END, st FROM @w WHERE id='TEST-wb-ready';
     INSERT @r SELECT 'H4d one unmapped -> NotReady', CASE WHEN st='NotReady' THEN 1 ELSE 0 END, st FROM @w WHERE id='TEST-wb-notready';
     INSERT @r SELECT 'H4e inactive linked source -> InactiveDataSource', CASE WHEN st='InactiveDataSource' THEN 1 ELSE 0 END, st FROM @w WHERE id='TEST-wb-inactive';
     INSERT @r SELECT 'H4f Unknown-kind source -> NotReady', CASE WHEN st='NotReady' THEN 1 ELSE 0 END, st FROM @w WHERE id='TEST-wb-unknown';
@@ -115,24 +106,6 @@ BEGIN TRY
     INSERT @r SELECT 'R8g file source + ready DWH source -> Ready', CASE WHEN st='Ready' THEN 1 ELSE 0 END, st FROM @w WHERE id='TEST-wb-filedwh';
     INSERT @r SELECT 'R8h file source + unmapped DWH source -> NotReady', CASE WHEN st='NotReady' THEN 1 ELSE 0 END, st FROM @w WHERE id='TEST-wb-fileunm';
     INSERT @r SELECT 'H4g removed link only -> not Ready (workbook absent or NoDataSources)', CASE WHEN NOT EXISTS (SELECT 1 FROM @w WHERE id='TEST-wb-removed' AND st='Ready') THEN 1 ELSE 0 END, ISNULL((SELECT st FROM @w WHERE id='TEST-wb-removed'),'absent');
-
-    ----- L1: static vs registry --------------------------------------------------------------------
-    BEGIN TRY
-        INSERT Integration.Tableau_StaticTable (SchemaName, TableName, Reason, SetBy) VALUES ('Dimension','AE','test','test');
-        INSERT @r VALUES ('L1a static insert of a registered table rejected', 0, 'accepted');
-        DELETE FROM Integration.Tableau_StaticTable WHERE SchemaName='Dimension' AND TableName='AE';
-    END TRY
-    BEGIN CATCH
-        INSERT @r VALUES ('L1a static insert of a registered table rejected', CASE WHEN ERROR_NUMBER()=50002 THEN 1 ELSE 0 END, LEFT(ERROR_MESSAGE(),100));
-    END CATCH
-    BEGIN TRY
-        INSERT Integration.Tableau_PipelineTable (PipelineName, SchemaName, TableName, ConfirmedBy) VALUES ('CQGlobalSGDW: DailyETL','dbo','SalesChannel_Excel','test');
-        INSERT @r VALUES ('L1b registry insert of a static table rejected', 0, 'accepted');
-        DELETE FROM Integration.Tableau_PipelineTable WHERE SchemaName='dbo' AND TableName='SalesChannel_Excel';
-    END TRY
-    BEGIN CATCH
-        INSERT @r VALUES ('L1b registry insert of a static table rejected', CASE WHEN ERROR_NUMBER()=50002 THEN 1 ELSE 0 END, LEFT(ERROR_MESSAGE(),100));
-    END CATCH
 
     ----- send log -----------------------------------------------------------------------------------
     INSERT Integration.Tableau_Subscription (Subscription_id, Workbook_id, TargetType, TargetId, Format) VALUES
@@ -186,24 +159,9 @@ BEGIN TRY
         INSERT @r VALUES ('H1c Released allows re-claim', 0, ERROR_MESSAGE());
     END CATCH
 
-    -- H2: Sent is final
+    -- H2: Sent rows (the Sent trigger was dropped; only the SentAt CHECK remains)
     UPDATE Integration.Tableau_SubscriptionSendLog SET Status='Sent', SentAt=SYSDATETIMEOFFSET() WHERE Subscription_id='TEST-sub' AND Status IN ('Claimed','TimedOut');
     INSERT @r SELECT '5b Claimed -> Sent update', CASE WHEN @@ROWCOUNT=1 THEN 1 ELSE 0 END, '';
-    DECLARE @tgt varchar(10);
-    DECLARE c2 CURSOR LOCAL FAST_FORWARD FOR SELECT v FROM (VALUES ('Failed'),('Claimed'),('TimedOut'),('Released')) t(v);
-    OPEN c2; FETCH NEXT FROM c2 INTO @tgt;
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            UPDATE Integration.Tableau_SubscriptionSendLog SET Status=@tgt WHERE Subscription_id='TEST-sub' AND Status='Sent';
-            INSERT @r VALUES ('H2 Sent -> '+@tgt+' rejected', 0, 'accepted');
-        END TRY
-        BEGIN CATCH
-            INSERT @r VALUES ('H2 Sent -> '+@tgt+' rejected', CASE WHEN ERROR_NUMBER()=50001 THEN 1 ELSE 0 END, 'rejected '+CAST(ERROR_NUMBER() AS varchar(10)));
-        END CATCH
-        FETCH NEXT FROM c2 INTO @tgt;
-    END
-    CLOSE c2; DEALLOCATE c2;
     UPDATE Integration.Tableau_SubscriptionSendLog SET Message='note' WHERE Subscription_id='TEST-sub' AND Status='Sent';
     INSERT @r SELECT 'H2 Sent row can still get a Message (no status change)', CASE WHEN @@ROWCOUNT=1 THEN 1 ELSE 0 END, '';
     BEGIN TRY
@@ -250,7 +208,6 @@ DELETE FROM Integration.Tableau_Subscription WHERE Subscription_id LIKE 'TEST-%'
 DELETE FROM Integration.Tableau_RefreshJob WHERE DataSource_id LIKE 'TEST-%';
 DELETE FROM Integration.Tableau_WorkbookDataSource WHERE Workbook_id LIKE 'TEST-%';
 DELETE FROM Integration.Tableau_DataSourceTable WHERE DataSource_id LIKE 'TEST-%';
-DELETE FROM Integration.Tableau_DataSourceOverride WHERE DataSource_id LIKE 'TEST-%';
 DELETE FROM Integration.Tableau_DataSource WHERE DataSource_id LIKE 'TEST-%';
 DELETE FROM Integration.Tableau_PipelineTable WHERE SchemaName = 'TESTSCH';
 DELETE FROM Integration.Tableau_StaticTable WHERE SchemaName = 'TESTSCH';
@@ -265,7 +222,7 @@ INSERT @r SELECT 'M2c every registry Schema.Table exists in the DWH', CASE WHEN 
     ISNULL(STRING_AGG(CONCAT(SchemaName,'.',TableName),', '),'all exist')
   FROM Integration.Tableau_PipelineTable
   WHERE OBJECT_ID(QUOTENAME(SchemaName)+'.'+QUOTENAME(TableName)) IS NULL;
-INSERT @r SELECT 'T all objects tagged created_by=T1_mapping_schema', CASE WHEN COUNT(*)=13 THEN 1 ELSE 0 END, CONCAT(COUNT(*),' of 13 tagged')
+INSERT @r SELECT 'T all objects tagged created_by=T1_mapping_schema', CASE WHEN COUNT(*)=12 THEN 1 ELSE 0 END, CONCAT(COUNT(*),' of 12 tagged')
   FROM sys.extended_properties WHERE class=1 AND minor_id=0 AND name='created_by' AND CAST(value AS nvarchar(128))='T1_mapping_schema';
 INSERT @r SELECT 'C no test rows left', CASE WHEN
    (SELECT COUNT(*) FROM Integration.Tableau_DataSource WHERE DataSource_id LIKE 'TEST-%')

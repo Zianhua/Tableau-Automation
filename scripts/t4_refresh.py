@@ -21,7 +21,7 @@ Success = 0 row blocks (fail closed).
 Known limit (pipeline level, PLAN_REVIEW G12): the gate only sees COMPLETED ETL rows. A rerun in progress, or a run that
 crashed without writing a row, is invisible; the earlier success of the day still counts. No cut-off time is applied:
 ETLs do not run after 16:30 (D-029) and the scheduler window handles the rest.
-Not covered (functional gap): sources with a NoReadinessCheck override, NotChecked sources (positively non-DWH: Excel/CSV files, other
+Not covered (functional gap): NotChecked sources (positively non-DWH: Excel/CSV files, other
 databases, D-053) and extracts whose tables are all static have no required pipeline, so they are never refreshed by this script. In
 particular an embedded Tableau EXTRACT of an Excel/CSV file is never refreshed by us: the report is sent with whatever that extract holds,
 which is stale unless Tableau's own schedule refreshes it.
@@ -633,8 +633,7 @@ def run(cur, tableau, *, execute, today, timeout_s=TIMEOUT_MIN * 60, poll_s=POLL
                "taken_over": len({r[0] for r in taken}), "taken_over_excluded": len(off)}
     ready = []
     busy = {}   # D-057: the "Tableau busy" check runs once, when the first target is otherwise ready to refresh
-    prio = ops.priorities(cur, "Extract")   # D-062: marked extracts first, the rest by name
-    for t in sorted(targets, key=lambda x: ops.priority_key(prio, x.id, x.name)):
+    for t in sorted(targets, key=lambda x: ((x.name or "").lower(), str(x.id))):   # run order: by name
         mine = [j for j in jobs if j["ds"] == t.id and (j["date"] == today.isoformat() or j["running"])]
         action, reason = decide(t, etl, mine)
         n_bad = sum(j["Status"] in ("Failed", "Cancelled") for j in mine)

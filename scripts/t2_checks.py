@@ -142,16 +142,16 @@ def main():
     nr = {w: v[1] for w, v in status.items() if v[0] != "Ready"}
     # D-053: Excel/CSV-only workbooks are no longer NotReady, so there is no expected count: derive it from the data.
     check("NotReady workbooks (%d) are not custom-SQL ones" % len(nr), not (set(nr) & cust), sorted(str(x) for x in nr.values()))
-    check("every NotReady workbook has a source that is not ready (not Ready, NoReadinessCheck or NotChecked)",
+    check("every NotReady workbook has a source that is not ready (not Ready or NotChecked)",
           all(scalar(cur, "SELECT COUNT(*) FROM Integration.Tableau_WorkbookDataSource w JOIN Integration.vw_Tableau_DataSourceReadiness r "
                           "ON r.DataSource_id = w.DataSource_id WHERE w.Workbook_id = ? AND w.Active_Flag = 1 "
-                          "AND r.ReadyStatus NOT IN ('Ready', 'NoReadinessCheck', 'NotChecked')", wid) > 0
+                          "AND r.ReadyStatus NOT IN ('Ready', 'NotChecked')", wid) > 0
               or scalar(cur, "SELECT COUNT(*) FROM Integration.vw_Tableau_WorkbookReadiness WHERE Workbook_id = ? AND WorkbookStatus IN ('InactiveDataSource', 'NoDataSources')", wid) > 0
               for wid in nr))
     check("NotChecked sources are exactly the flagged ones without a DWH table",
           scalar(cur, "SELECT COUNT(*) FROM Integration.vw_Tableau_DataSourceReadiness r JOIN Integration.Tableau_DataSource d ON d.DataSource_id = r.DataSource_id "
                       "WHERE CASE WHEN r.ReadyStatus = 'NotChecked' THEN 1 ELSE 0 END <> "
-                      "CASE WHEN d.NonDwhConnection = 1 AND r.TableCount = 0 AND r.ReadyStatus NOT IN ('NoReadinessCheck', 'UnknownKind') THEN 1 ELSE 0 END") == 0)
+                      "CASE WHEN d.NonDwhConnection = 1 AND r.TableCount = 0 AND r.ReadyStatus <> 'UnknownKind' THEN 1 ELSE 0 END") == 0)
     near("Ready workbooks", len(status) - len(nr), {"Ready workbooks": (exp["workbooks"][0], 5)})
     check("registry row Integration.MultipleAccounts_Staging -> DailyETL", scalar(cur, "SELECT COUNT(*) FROM Integration.Tableau_PipelineTable WHERE SchemaName='Integration' AND TableName='MultipleAccounts_Staging' AND PipelineName='CQGlobalSGDW: DailyETL'") == 1)
     if scalar(cur, "SELECT COUNT(*) FROM Integration.vw_Tableau_DataSourceReadiness WHERE DataSource_Name='parent acc with trade'") == 0:
@@ -241,6 +241,19 @@ def main():
           not m.is_positive_non_dwh(csv_tbl("t", "sqlserver", "Other;Db")) and not m.is_positive_non_dwh(csv_tbl("t", "sqlserver", "")))
     check("non-DWH: is_positive_non_dwh needs a name and a named type", not m.is_positive_non_dwh({"name": None, "connectionType": "textscan"})
           and not m.is_positive_non_dwh({}) and m.is_positive_non_dwh({"name": "a", "connectionType": "Excel-Direct"}))
+    # static/registry clash (D-081): the check sees a table in both lists; rolled back, nothing stays
+    conn2 = m.connect()
+    c2 = conn2.cursor()
+    base_clash = m.rs.static_clashes(c2)
+    check("no table is in both the static list and the registry (%d found)" % len(base_clash), base_clash == [], ", ".join(base_clash))
+    try:
+        c2.execute("INSERT Integration.Tableau_StaticTable (SchemaName, TableName, Reason, SetBy) VALUES ('TESTSCH', 'Clash1', 'check', 'check')")
+        c2.execute("INSERT Integration.Tableau_PipelineTable (PipelineName, SchemaName, TableName, ConfirmedBy) VALUES ('CQGlobalSGDW: DailyETL', 'TESTSCH', 'Clash1', 'check')")
+        got = m.rs.static_clashes(c2)
+        check("clash check: a table in both lists is reported (and the database no longer refuses the row)", got == sorted(base_clash + ["TESTSCH.Clash1"]), str(got))
+    finally:
+        conn2.rollback()
+        conn2.close()
     print("\nWorkbook readiness:")
     for r in cur.execute("SELECT WorkbookStatus, COUNT(*) FROM Integration.vw_Tableau_WorkbookReadiness GROUP BY WorkbookStatus"):
         print("  %-20s %d" % (r[0], r[1]))
@@ -254,6 +267,7 @@ def main():
         res = subprocess.run([sys.executable, str(Path(__file__).with_name("t2_mapping_sync.py")), "--local-smtp"],
                              capture_output=True, text=True, env=env)
         check("rerun exits 0", res.returncode == 0, res.stderr[-200:])
+        check("rerun reports static_clash=0 in its run summary", "static_clash=0" in (res.stdout + res.stderr), (res.stdout + res.stderr)[-200:])
         after = snapshot(m.connect().cursor())
         check("rerun changes nothing (row counts and content hash, LastSeenAt excluded)", before == after, "" if before == after else "%s -> %s" % (before, after))
         dry = subprocess.run([sys.executable, str(Path(__file__).with_name("t2_mapping_sync.py")), "--dry-run", "--local-smtp"],

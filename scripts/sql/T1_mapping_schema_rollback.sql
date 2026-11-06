@@ -29,7 +29,7 @@ INSERT @o (kind, name) VALUES
  ('VIEW','vw_Tableau_WorkbookReadiness'),('VIEW','vw_Tableau_DataSourceReadiness'),
  ('VIEW','vw_Tableau_DataSourcePipeline'),('VIEW','vw_Tableau_DataSourceTableStatus'),
  ('TABLE','Tableau_SubscriptionSendLog'),('TABLE','Tableau_Subscription'),('TABLE','Tableau_RefreshJob'),
- ('TABLE','Tableau_DataSourceOverride'),('TABLE','Tableau_DataSourceTable'),('TABLE','Tableau_WorkbookDataSource'),
+ ('TABLE','Tableau_DataSourceTable'),('TABLE','Tableau_WorkbookDataSource'),
  ('TABLE','Tableau_DataSource'),('TABLE','Tableau_StaticTable'),('TABLE','Tableau_PipelineTable');
 DECLARE @k varchar(5), @n sysname, @sql nvarchar(400);
 DECLARE c CURSOR LOCAL FAST_FORWARD FOR SELECT kind, name FROM @o ORDER BY seq;

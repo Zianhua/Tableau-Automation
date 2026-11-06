@@ -53,7 +53,7 @@ WHY_SQL = """
 SELECT w.Workbook_id, r.DataSource_Name, r.ReadyStatus, r.RefreshKind
 FROM Integration.Tableau_WorkbookDataSource w
 JOIN Integration.vw_Tableau_DataSourceReadiness r ON r.DataSource_id = w.DataSource_id
-WHERE w.Active_Flag = 1 AND r.ReadyStatus NOT IN ('Ready', 'NoReadinessCheck', 'NotChecked')"""
+WHERE w.Active_Flag = 1 AND r.ReadyStatus NOT IN ('Ready', 'NotChecked')"""
 
 WHY_TEXT = {"NoTables": "no warehouse table found and no file / other-database connection identified (custom SQL or read problem, D-021/D-053)", "Unmapped": "table not in the pipeline registry",
             "UnknownPipeline": "pipeline unknown"}

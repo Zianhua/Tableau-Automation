@@ -34,7 +34,7 @@ test subscription on a workbook with 2 data sources) is picked up by the next ru
 
 Schedules (R1, D-036): for every subscription the REST schedule object is read (frequency, weekdays, month day(s), start time,
 interval, state) into Integration.Tableau_Schedule, and Tableau_Subscription.ScheduleId. t6/t4 use it to decide what is due.
-Apply scripts/sql/R1_schedule_schema.sql and scripts/sql/R5_workbook_updated_at.sql first (the script stops with a message if missing).
+The database objects (see the DBJR document, ITSC_384043_TableauEnhancement_ML) must exist first (the script stops with a message if missing).
 R5/F-3: Tableau_Subscription.WorkbookUpdatedAt = the workbook updated_at as read from the REST list at the start of the run (naive UTC);
 t6 compares the live updated_at with it.
 
@@ -56,7 +56,7 @@ the override and is never changed. A dry run prints the difference and writes no
 reported and stay unmapped (their extracts are not refreshed).
 Extract refresh tasks (D-067): the Tableau extract refresh tasks and their schedules are read (read-only) into Integration.Tableau_ExtractTask
 and Integration.Tableau_Schedule; t4 uses them for the extracts whose task extract_takeover.py has taken over.
-Needs scripts/sql/ExtractAuto_schema.sql.
+Needs the extract/registry objects from the DBJR document (ITSC_384043_TableauEnhancement_ML).
 
 Usage:
   python scripts/t2_mapping_sync.py --dry-run     # read everything, print what would change, write nothing
@@ -890,7 +890,7 @@ def read_extract_tasks(cur, server, ds_rows, stats, problems):
 
 
 def run_sync(a, cur, conn, tableau):
-    """Read Tableau and (unless --dry-run) write the DWH. Returns (exit code, summary text, problems, registry notes, unconfirmed tables).
+    """Read Tableau and (unless --dry-run) write the DWH. Returns (exit code, summary text, problems, registry notes, unconfirmed tables, static/registry clashes).
     a.registry_first_run: the higher per-run registry cap, for the very first run only (D-075)."""
     accept = set(getattr(a, "accept_drops", None) or [])
     stored = {r[0]: r[1] for r in cur.execute("SELECT Workbook_id, COUNT(*) FROM Integration.Tableau_WorkbookDataSource "
@@ -976,11 +976,19 @@ def run_sync(a, cur, conn, tableau):
         log.exception("Registry derivation failed")
         problems.append(("registry", "-", "%s: %s" % (type(e).__name__, str(e)[:150])))
         reg = "registry=FAILED"
+    clashes = []
+    try:   # D-081: a table in both the static list and the registry is ambiguous; report it, never crash the sync
+        clashes = rs.static_clashes(cur)
+        if clashes:
+            log.error("STATIC/REGISTRY CLASH: %s is in both Tableau_StaticTable and Tableau_PipelineTable", ", ".join(clashes))
+    except Exception as e:
+        log.exception("Static/registry clash check failed")
+        problems.append(("static_clash_check", "-", "%s: %s" % (type(e).__name__, str(e)[:150])))
     code = 2 if problems else 0
-    text = ("workbooks=%d subscriptions=%d schedules=%d data_sources=%d extract_tasks=%s skipped_workbooks=%d skipped_subscriptions=%d problems=%d %s"
+    text = ("workbooks=%d subscriptions=%d schedules=%d data_sources=%d extract_tasks=%s skipped_workbooks=%d skipped_subscriptions=%d problems=%d static_clash=%d %s"
             % (len(wb_names), len(sub_rows), len(stats["schedules"]), len(ds_rows), "unread" if ext_tasks is None else len(ext_tasks),
-               len(stats["skipped_wbs"]), len(stats["skipped_subs"]), len(problems), reg))
-    return code, text, problems, notes, unconfirmed
+               len(stats["skipped_wbs"]), len(stats["skipped_subs"]), len(problems), len(clashes), reg))
+    return code, text, problems, notes, unconfirmed, clashes
 
 
 def main(argv=None):
@@ -1033,7 +1041,7 @@ def main(argv=None):
         return fail("DWH connect or guard failed: %s" % (e if isinstance(e, SystemExit) else type(e).__name__))
     cur = conn.cursor()
     if not schema_ready(cur):
-        return fail("Integration.Tableau_Schedule / Tableau_Subscription.ScheduleId / WorkbookUpdatedAt / Tableau_DataSource.NonDwhConnection missing: run scripts/sql/R1_schedule_schema.sql, R5_workbook_updated_at.sql, R8_nondwh_sources.sql and ExtractAuto_schema.sql")
+        return fail("Integration.Tableau_Schedule / Tableau_Subscription.ScheduleId / WorkbookUpdatedAt / Tableau_DataSource.NonDwhConnection missing: the objects come from the DBJR document (ITSC_384043_TableauEnhancement_ML)")
     tableau = None
     try:
         for attempt in range(LOCK_RETRIES + 1):
@@ -1046,7 +1054,7 @@ def main(argv=None):
                     return fail("Tableau PAT session lock still held after %d tries" % (LOCK_RETRIES + 1))
                 log.warning("PAT lock busy, waiting %d s (try %d of %d)", LOCK_WAIT_S, attempt + 1, LOCK_RETRIES + 1)
                 time.sleep(LOCK_WAIT_S)
-        code, text, problems, notes, unconfirmed = run_sync(a, cur, conn, tableau)
+        code, text, problems, notes, unconfirmed, clashes = run_sync(a, cur, conn, tableau)
     except SystemExit:
         return fail("Tableau sign-in failed")
     except Exception as e:
@@ -1068,6 +1076,9 @@ def main(argv=None):
     if unconfirmed:
         alert("registry_unconfirmed", "%d table(s) have no ETL log evidence for their pipeline and were NOT registered, so their extracts are not "
               "refreshed or taken over: %s. Add a Manual row in Tableau_PipelineTable to decide." % (len(unconfirmed), "; ".join(unconfirmed[:20])))
+    if clashes:
+        alert("static_registry_clash", "%d table(s) are in BOTH Tableau_StaticTable and Tableau_PipelineTable, so it is unclear whether they need a freshness "
+              "check: %s. Remove the row from one of the two tables. Nothing was changed by the sync." % (len(clashes), "; ".join(clashes[:20])))
     ops.write_marker("t2", mode, code, "RUN SUMMARY " + text)
     return code
 

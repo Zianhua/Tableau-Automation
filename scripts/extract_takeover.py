@@ -690,7 +690,7 @@ def main(argv=None):
         return fatal("DWH connect or guard failed: %s" % (e if isinstance(e, SystemExit) else type(e).__name__))
     if cur.execute("SELECT COUNT(*) FROM sys.tables WHERE name IN ('Tableau_ExtractTask', 'Tableau_ExtractTaskBackup') AND schema_id = SCHEMA_ID('Integration')").fetchone()[0] != 2             or cur.execute("SELECT COL_LENGTH('Integration.Tableau_ExtractTaskBackup', 'NoRetake')").fetchone()[0] is None \
             or cur.execute("SELECT COL_LENGTH('Integration.Tableau_ExtractTaskBackup', 'OldJobMappingIds')").fetchone()[0] is None:
-        return fatal("Integration.Tableau_ExtractTask / Tableau_ExtractTaskBackup (with NoRetake and OldJobMappingIds) missing: run scripts/sql/ExtractAuto_schema.sql")
+        return fatal("Integration.Tableau_ExtractTask / Tableau_ExtractTaskBackup (with NoRetake and OldJobMappingIds) missing: the objects come from the DBJR document (ITSC_384043_TableauEnhancement_ML)")
     if cfg.execute:
         got = cur.execute("DECLARE @r int; EXEC @r = sp_getapplock @Resource = ?, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 0; SELECT @r", LOCK_NAME).fetchone()[0]
         if got < 0:

@@ -10,7 +10,7 @@ static table list. Idempotent: inserts only rows that are missing; never updates
 A re-assigned pipeline (table moved to another pipeline) is NOT handled: delete the old row by hand first,
 otherwise the table ends up in two pipelines. The last query lists registry rows that are not in this CSV
 (hand-added or stale) so they are visible after every load.
-Mapping confirmed by the user in D-025. Requires T1_mapping_schema.sql. Dev DWH.
+Mapping confirmed by the user in D-025. Requires the mapping objects from the DBJR document (ITSC_384043_TableauEnhancement_ML). Dev DWH.
 */
 SET NOCOUNT ON;
 SELECT * INTO #csv FROM (VALUES

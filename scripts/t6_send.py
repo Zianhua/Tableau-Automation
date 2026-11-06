@@ -23,7 +23,7 @@ Freshness gate (fail closed on anything unknown):
     submitted AFTER the latest end of the pipelines behind that target (same rule as t4_refresh.py); live sources need
     no refresh, only the ETL gate; a workbook with nothing to gate on at all is not sent.
 
-Send log (T1_mapping_schema.sql section 8, claim-first, at-most-once; the only table this script writes):
+Send log (created from the DBJR document, claim-first, at-most-once; the only table this script writes):
   1. app lock for the run; at start Claimed rows older than the claim timeout (90 min, D-029) become TimedOut;
   2. INSERT 'Claimed' (the unique index allows one Claimed/Sent/TimedOut row per subscription per Singapore day);
   3. export, build the mail, send; on SMTP acceptance UPDATE to 'Sent' (a failure of that update is logged, never retried);
@@ -476,8 +476,6 @@ def load_subscriptions(cur, ids=None, workbook=None, id_like="%"):
                 taken_over=r[10] is not None, paused=bool(r[11]), repaused_date=r[12],
                 sched_id=r[13], paused_at=r[14], halted=bool(r[15]), wb_updated=r[16])
             for r in cur.execute(SUBS_SQL, id_like).fetchall()]
-    prio = ops.priorities(cur, "Subscription")   # D-062: marked subscriptions first; the SQL order (workbook, subject) breaks ties
-    subs.sort(key=lambda s: prio.get(s.id, 2 ** 31))
     if ids:
         subs = [s for s in subs if s.id in ids]
     if workbook:
@@ -536,8 +534,6 @@ class Gate:
             return False, "data source list incomplete (%d of %d)" % (len(srcs), count)
         gated, unchecked = 0, 0
         for s in srcs:
-            if s["status"] == "NoReadinessCheck":
-                continue
             if s["status"] == "NotChecked":   # D-053: positively non-DWH (file / other database): deemed ready, nothing to wait for
                 unchecked += 1
                 continue
@@ -573,8 +569,6 @@ class Gate:
             return False, "blocked", "data source list incomplete (%d of %d)" % (len(srcs), count)
         waits, gated, unchecked = [], 0, 0
         for s in srcs:
-            if s["status"] == "NoReadinessCheck":
-                continue
             if s["status"] == "NotChecked":   # D-053: positively non-DWH (file / other database): deemed ready, nothing to wait for
                 unchecked += 1
                 continue

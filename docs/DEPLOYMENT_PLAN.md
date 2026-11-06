@@ -1,6 +1,6 @@
 # Deployment plan (to the server that hosts the scripts)
 
-Written 2026-10-26, corrected 2026-11-04 (database order, guards read from `.env`, run order, automatic extract refresh and extract takeover task added). For the data engineer and for the DBA / server administrator. Plain names first; file names or tags in brackets.
+Written 2026-10-26, corrected 2026-11-04 (database order, guards read from `.env`, automatic extract refresh and extract takeover task added; run-order table, override table and static/registry triggers removed). For the data engineer and for the DBA / server administrator. Plain names first; file names or tags in brackets.
 
 **Status: nothing in this plan has been done on the target host.** The scripts have only run on the developer machine against the **dev** warehouse and the **UAT** Tableau server. Where a step is unverified it says so. Open decisions are marked **OPEN**. Database side: see [DB_CHANGES.md](DB_CHANGES.md). Operating the system afterwards: [RUNBOOK.md](RUNBOOK.md). Read-only production checks: [PROD_PREFLIGHT.md](PROD_PREFLIGHT.md).
 
@@ -8,7 +8,7 @@ Written 2026-10-26, corrected 2026-11-04 (database order, guards read from `.env
 
 **Order that matters: apply the SQL (step 6) BEFORE the code is put into use.** The code can be copied to the host (step 3) at any time, but no script may run and no task may be registered (steps 8 and 9) until the database changes are applied: the mapping sync checks its tables at start (a missing one is a fatal error) and the extract takeover refuses to start without its tables and the column `NoRetake`. Rolling back is the reverse: code first, SQL second.
 
-Small Python scripts run from Windows Task Scheduler on one host: a daily mapping sync (copies workbooks, data sources, subscriptions, schedules and extract refresh tasks from Tableau into the warehouse, and keeps the table-to-pipeline registry in step with the lineage tables), a daily extract takeover check at 08:20 (a dry run until it is enabled; it also mails an alert when a taken-over extract is not being refreshed), three scripts every 15 minutes between 08:30 and 16:30 (take over and pause the old Tableau subscriptions; refresh extracts once their ETL loads have succeeded, in the run order of the priority table; export and email the reports that are due and ready, once per subscription per day), a watchdog every 15 minutes, plus an end-of-day summary mail. State lives in new tables in the warehouse schema `Integration` and in the folder `out\` next to the scripts.
+Small Python scripts run from Windows Task Scheduler on one host: a daily mapping sync (copies workbooks, data sources, subscriptions, schedules and extract refresh tasks from Tableau into the warehouse, and keeps the table-to-pipeline registry in step with the lineage tables), a daily extract takeover check at 08:20 (a dry run until it is enabled; it also mails an alert when a taken-over extract is not being refreshed), three scripts every 15 minutes between 08:30 and 16:30 (take over and pause the old Tableau subscriptions; refresh extracts once their ETL loads have succeeded, in name order; export and email the reports that are due and ready, once per subscription per day), a watchdog every 15 minutes, plus an end-of-day summary mail. State lives in new tables in the warehouse schema `Integration` and in the folder `out\` next to the scripts.
 
 ## 1. Decisions that must be made before or during the deployment (OPEN)
 
@@ -130,23 +130,21 @@ The scripts and every SQL file refuse to run unless the server is the one named 
 
 1. Record `SELECT @@SERVERNAME, DB_NAME()` on the production DWH (read-only preflight, [PROD_PREFLIGHT.md](PROD_PREFLIGHT.md) section 1).
 2. **Python scripts:** in the production `.env` set `DEV_DWH_SERVER` and `DEV_DWH_DATABASE` to the production server (fully qualified) and database, and `CONN_SERVER` / `CONN_DATABASE` to the same text (case-insensitive). After connecting, `@@SERVERNAME` must start with the first label of `DEV_DWH_SERVER`. The scripts need no edit.
-3. **SQL files:** one search-and-replace in `scripts/sql` (not `T1_tests.sql`): `NOT IN ('<DEV_DWH_SERVER>')` becomes `NOT IN ('<production @@SERVERNAME>')`, so 19 files change; then update the two checks that assert the name (`extract_checks.py`, `t11_checks.py`) and re-run all eight checks files. That edit is the DBA's or the data engineer's, with a second person looking at the diff.
+3. **SQL files:** one search-and-replace in `scripts/sql` (not `T1_tests.sql`): `NOT IN ('<DEV_DWH_SERVER>')` becomes `NOT IN ('<production @@SERVERNAME>')`, so 17 files change; then update the two checks that assert the name (`extract_checks.py`, `t11_checks.py`) and re-run all eight checks files. That edit is the DBA's or the data engineer's, with a second person looking at the diff.
 4. Until then **every script stops at start** on production ("Refusing to run: only the dev DWH ... is allowed") and every SQL file prints its error and does nothing. That is the designed fail-safe, not a fault.
 
 ## 6. Apply the database changes (with the DBA) - BEFORE any script runs
 
-Follow [DB_CHANGES.md](DB_CHANGES.md): the summary table at its top, then sections 3 and 9. The ten files in order (the last two are the run-order table `R9_priority.sql` and the automatic registry / extract refresh schema `ExtractAuto_schema.sql`), then the single grant script for the service account. Nothing in steps 8 to 10 may run before this is done. Then verify, as the DBA:
+Follow [DB_CHANGES.md](DB_CHANGES.md): the summary table at its top, then sections 3 and 9. The objects are created from the DBJR document (ITSC_384043_TableauEnhancement_ML); the creation scripts are no longer shipped in this repo (only rollbacks and `T3_load_registry.sql` are), then the single grant script for the service account. Nothing in steps 8 to 10 may run before this is done. Then verify, as the DBA:
 
 ```sql
 SELECT CAST(value AS nvarchar(60)) AS Tag, COUNT(*) AS Objects
 FROM sys.extended_properties WHERE class = 1 AND minor_id = 0 AND name = 'created_by'
-GROUP BY CAST(value AS nvarchar(60));          -- expect T1_mapping_schema 13, R1_schedule_schema 1, T11_pause_schema 1, ExtractAuto_schema 4
+GROUP BY CAST(value AS nvarchar(60));          -- expect T1_mapping_schema 12, R1_schedule_schema 1, T11_pause_schema 1, ExtractAuto_schema 4
 SELECT COUNT(*) AS RegistryRows FROM Integration.Tableau_PipelineTable;   -- expect 33 (after validating the registry against production)
-SELECT OBJECT_ID('Integration.Tableau_Priority') AS PriorityTable, OBJECT_ID('Integration.vw_Tableau_PriorityPicker') AS PickerView,
-       COL_LENGTH('Integration.Tableau_ExtractTaskBackup', 'NoRetake') AS NoRetakeLen,
-       COL_LENGTH('Integration.Tableau_ExtractTaskBackup', 'OldJobMappingIds') AS OldJobLen;   -- all four not NULL
+SELECT COL_LENGTH('Integration.Tableau_ExtractTaskBackup', 'NoRetake') AS NoRetakeLen,
+       COL_LENGTH('Integration.Tableau_ExtractTaskBackup', 'OldJobMappingIds') AS OldJobLen;   -- both not NULL
 ```
-Run the last query also as the service account (`EXECUTE AS USER` or a test login): `Tableau_Priority` NULL there means the `SELECT` grant is missing and priority marks would be silently ignored.
 
 Nothing else in this plan writes to the warehouse until step 10, stage 3 (the first real mapping sync).
 
@@ -288,7 +286,7 @@ All scripts then log `KILL SWITCH ACTIVE`, send one alert a day, do nothing and 
    This marks the backup row restored first, then un-suspends the subscription in Tableau. It is refused for a subscription that was sent today (a second mail could follow from Tableau's own schedule) unless `--allow-restore-after-send`. Afterwards check in the Tableau UI that subscription, schedule, subject and format are as before. A subscription that was suspended in Tableau before the takeover comes back **active**: the script does not remember the original state.
 3. Remove the tasks: `.\scripts\schedule\register_tasks.ps1 -Unregister` (add `-WhatIf` to preview).
 4. Give back every taken-over extract task first if any: `& $py scripts\extract_takeover.py --restore-all --execute`.
-5. Only if the database objects must go too: the SQL rollbacks in reverse order ([DB_CHANGES.md](DB_CHANGES.md) section 8: ExtractAuto, R9, R8, R5, R4, R3, T11, R1, T1), **after** the code is stopped. Leaving them in place is harmless.
+5. Only if the database objects must go too: the SQL rollbacks in reverse order ([DB_CHANGES_DETAIL.md](DB_CHANGES_DETAIL.md) section 8: ExtractAuto, R8, R5, R4, R3, T11, R1, T1), **after** the code is stopped. Leaving them in place is harmless.
 
 A subscription deleted in Tableau cannot be restored by the script. The backup table and `out\t11_backup\*.json` hold the old definition, but re-creating it is manual.
 
@@ -298,7 +296,6 @@ A subscription deleted in Tableau cannot be restored by the script. The backup t
 - **Anything on production:** the production warehouse, the production Tableau server (REST version, HTTPS, token rights, schedule time zone), the registry rows against production metadata.
 - **The warehouse guards on production:** the values to set (step 5) have not been set or tried on the production host; the SQL guard edit has not been made or reviewed.
 - **The extract takeover** has never taken over a task (the extract task backup table on dev is empty); neither delete nor restore has run against a real Tableau task in this project, and the automatic registry has never been applied on dev (33 `Manual` rows only).
-- **The run-order table** was only exercised by the check scripts.
 - **Real mail through SES** (login, sandbox, verified sender, size cap, throttling, the list of "not queued" replies). Only a local test server and, on 2026-10-23 and 2026-10-26, the project owner's Gmail account have been used.
 - A real **Windows Event Log** write by the service account (the checks fake it).
 - **Restricted database permissions:** every run so far used a login with full rights on dev.
