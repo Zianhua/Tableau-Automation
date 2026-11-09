@@ -19,7 +19,7 @@ Small Python scripts run from Windows Task Scheduler on one host: a daily mappin
 | 3 | **Production mail path.** Recommendation in the project: Amazon SES (the team owns the SES credentials). Not chosen, not tested. Needs a verified sender, a credential, outbound access from the host, and the attachment size limit (unknown). | team, SES owner | 4, 10 |
 | 4 | **Who owns the Tableau token** (personal access token) and where it is rotated. It must be a separate token from the old refresh job's (D-017), ideally owned by a service user; only one session per token at a time. | Tableau admin | 4 |
 | 5 | **Production DWH server name** as `@@SERVERNAME` and database name (read from the server; not verified). Used to edit the SQL guard line and to fill `DEV_DWH_SERVER` / `DEV_DWH_DATABASE` / `CONN_SERVER` / `CONN_DATABASE` in the production `.env`. No code change is needed. | data engineer, DBA | 4, 5, 6 |
-| 6 | **How production recipients are allowed.** The "mail every subscriber" switch is for UAT only (D-050); production needs `SEND_ALLOWED_RECIPIENTS`, an exact comma list of addresses (no wildcards). D-052 item 5 says production should also mail whoever is subscribed in Tableau and that the switch "is to be extended to the production host at the production preflight". These two statements disagree. Decide before the second pilot step. | data engineer | 10 |
+| 6 | **How production recipients are allowed.** The "mail every subscriber" switch (D-050) is now host-tied, not UAT-only (D-082): set `SEND_TO_ALL_SUBSCRIBERS=1` and `SEND_TO_ALL_HOST=<prod host>` for production, or use `SEND_ALLOWED_RECIPIENTS` (exact comma list, no wildcards). The user decided on 2026-11-04 that production mails every subscriber. Decide before the second pilot step. | data engineer | 10 |
 | 7 | Whether the repository will be committed/tagged before deployment. The working copy has uncommitted changes (checked 2026-10-26). Deploy a commit, not a working copy. | data engineer | 3 |
 
 ## 2. Prerequisites (host)
@@ -91,7 +91,7 @@ notepad .env        # fill in the values; never paste them into chat, tickets or
 icacls .env /inheritance:r /grant:r "DOMAIN\svc_tableau:R" "BUILTIN\Administrators:F"
 ```
 
-`.env` is gitignored. It holds the Tableau token and the SMTP password in clear text, so restrict it. **The template `.env.example` does not yet list `SEND_ALLOW_ALL_UAT`, `LOG_RETENTION_DAYS`, the takeover settings (`EXTRACT_TAKEOVER_*` below included) or `T4_REFRESH_SCOPE`; add them to your `.env` by hand from the table below.**
+`.env` is gitignored. It holds the Tableau token and the SMTP password in clear text, so restrict it. **The template `.env.example` does not yet list `SEND_TO_ALL_SUBSCRIBERS`, `LOG_RETENTION_DAYS`, the takeover settings (`EXTRACT_TAKEOVER_*` below included) or `T4_REFRESH_SCOPE`; add them to your `.env` by hand from the table below.**
 
 Key names and meaning (values come from the owners named; never written down here):
 
@@ -103,14 +103,14 @@ Key names and meaning (values come from the owners named; never written down her
 | `CONN_DRIVER` | ODBC driver, `{ODBC Driver 17 for SQL Server}`. | this document |
 | `CONN_SERVER`, `CONN_DATABASE` | The warehouse server (fully qualified name) and database `CQGlobalSGDW`. **Must equal `DEV_DWH_SERVER` / `DEV_DWH_DATABASE` below** (case-insensitive; step 5). Windows authentication; no user or password. | DBA (decision 5) |
 | `DEV_DWH_SERVER`, `DEV_DWH_DATABASE` | The warehouse guard of the Python scripts. The names say DEV but on production they hold the **production** server and database (the only ones the scripts may touch). Unset = every script refuses to run. | DBA (decision 5) |
-| `UAT_TABLEAU_HOST` | Host of the UAT Tableau server; only used by the UAT-only `SEND_ALLOW_ALL_UAT` switch. **Leave out of the production `.env`** together with `SEND_ALLOW_ALL_UAT`. | UAT only |
+| `SEND_TO_ALL_HOST` | Host of the one Tableau server on which the `SEND_TO_ALL_SUBSCRIBERS` switch may take effect (UAT or production). Unset = the switch never works. Old name `UAT_TABLEAU_HOST` still accepted. | you |
 | `MAIL_TRANSPORT` | `local` = every mail goes to a local test sink and **nobody is told anything**; `smtp` = real mail from every script. Default `local`. Keep `local` until the mail test in step 10 (stage 5); set `smtp` only then. | you |
 | `SMTP_PROVIDER` | `ses`, `gmail` or `generic`. Decides which server replies are treated as "message certainly not queued". Only `ses` has a list (written from memory of SES behaviour, to be verified at the first live test). | you |
 | `SMTP_HOST`, `SMTP_PORT` | SMTP server and port (587, STARTTLS). SES Tokyo: `email-smtp.ap-northeast-1.amazonaws.com`. | SES owner (decision 3) |
 | `SMTP_USER`, `SMTP_PASSWORD` | SMTP credential (for SES: SMTP credentials created in AWS, not an IAM password). The older names `SES_SMTP_USER` / `SES_SMTP_PASSWORD` are still accepted. | SES owner |
 | `SEND_FROM` | Sender address; must be verified at the mail server. | SES owner |
 | `SEND_ALLOWED_RECIPIENTS` | **Production:** the exact comma-separated list of addresses that may receive mail. Required for any real send; every other recipient is dropped and counted. It must contain `ALERT_TO`. | you / team (decision 6) |
-| `SEND_ALLOW_ALL_UAT` | `1` = no allow-list **on the UAT Tableau server only** (D-050). It is ignored (with a warning in every log) on any other host, and **must not be set in production**. Leave it out of the production `.env`. | UAT only |
+| `SEND_TO_ALL_SUBSCRIBERS` | `1` = no allow-list: every subscriber of a taken-over subscription gets the mail, **on the host named in `SEND_TO_ALL_HOST` only** (D-050, D-082). Ignored with a warning on any other host. Production uses this per the 2026-11-04 decision (decision 6); otherwise leave it out and use `SEND_ALLOWED_RECIPIENTS`. Old name `SEND_ALLOW_ALL_UAT` still accepted. | you (decision 6) |
 | `ALERT_TO` | Where alerts and the daily summary go. Default `you@example.com` (D-018, changed by D-058). Must be a valid address and (production) on `SEND_ALLOWED_RECIPIENTS`. | team |
 | `ADDR_HASH_SALT` | Any random text. Salts the short hash of the recipient list that appears in the logs, so addresses cannot be recovered from them. Unset while sending for real gives a startup warning. | generate: `[guid]::NewGuid()` |
 | `LOG_RETENTION_DAYS` | Days of script log files kept (default 7, minimum 1). One file per script per day; each script deletes its own older files when it starts. Does not touch markers, alert state, takeover backups or any database table. | you |
@@ -189,7 +189,7 @@ Before the first real mapping sync (step 10, stage 3) the mapping tables are emp
 
 Also check:
 - The first line of every log says `MAIL TRANSPORT local ...`. If it says `smtp`, stop.
-- No line says `SEND_ALLOW_ALL_UAT=1 is ON` on production. If it appears, remove the key from `.env`.
+- On production, `SEND_TO_ALL_SUBSCRIBERS=1 is ON` should appear only if you chose to turn it on (decision 6). If it appears unexpectedly, remove the key from `.env`.
 - `review_list.py` (read-only, writes `out\review_list.csv`): `& $py scripts\review_list.py`. Needs the mapping to have been synced.
 - **Known defect found while writing this plan (2026-10-26):** `scripts\daily_summary.py` crashes with `TypeError: not enough arguments for format string` when the send log has a `Failed`, `Claimed` or `TimedOut` row for today, or when a takeover is halted (lines 160 and 162 format a database row with `%`; a tuple is needed). On exactly the days when something went wrong, the summary mail would not be built. Fix before relying on the summary. Verified by reproducing the formatting error with a database row, not by a full run with such rows.
 

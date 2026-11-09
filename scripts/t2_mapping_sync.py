@@ -995,7 +995,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dry-run", action="store_true", help="read Tableau and the DWH, print the plan, write nothing")
     ap.add_argument("--smtp", "--ses", dest="ses", action="store_true",
-                    help="alert mails through the real SMTP server (needs the SMTP_* settings and SEND_ALLOWED_RECIPIENTS, which is not needed on UAT with SEND_ALLOW_ALL_UAT=1); or MAIL_TRANSPORT=smtp")
+                    help="alert mails through the real SMTP server (needs the SMTP_* settings and SEND_ALLOWED_RECIPIENTS, which is not needed with SEND_TO_ALL_SUBSCRIBERS=1 on the configured host); or MAIL_TRANSPORT=smtp")
     ap.add_argument("--local-smtp", action="store_true", help="force the local test sink even if MAIL_TRANSPORT=smtp")
     ap.add_argument("--accept-drops", action="append", metavar="WORKBOOK_ID",
                     help="accept this workbook's shrinkage (fewer data sources / tables) as real; repeatable, one id per use, each is logged")

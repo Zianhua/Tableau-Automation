@@ -89,7 +89,7 @@ def child_env():
     import tempfile
     tmp = tempfile.mkdtemp(prefix="t2checks_")
     env = {k: v for k, v in os.environ.items() if not k.startswith(("SMTP_", "SES_")) and k not in
-           ("SEND_ALLOWED_RECIPIENTS", "SEND_ALLOW_ALL_UAT", "SEND_FROM", "ALERT_TO", "ADDR_HASH_SALT", "TABLEAU_AUTOMATION_DISABLED")}
+           ("SEND_ALLOWED_RECIPIENTS", "SEND_TO_ALL_SUBSCRIBERS", "SEND_ALLOW_ALL_UAT", "SEND_TO_ALL_HOST", "UAT_TABLEAU_HOST", "SEND_FROM", "ALERT_TO", "ADDR_HASH_SALT", "TABLEAU_AUTOMATION_DISABLED")}
     env.update(MAIL_TRANSPORT="local", LASTRUN_DIR=tmp, OPS_STATE_DIR=tmp, LOG_DIR=tmp, EVENTLOG_DISABLED="1")
     return env
 

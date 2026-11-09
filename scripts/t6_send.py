@@ -33,7 +33,7 @@ Send log (created from the DBJR document, claim-first, at-most-once; the only ta
 Recipients are read from Tableau at send time and never stored; logs show only a count and a short hash.
 
 Mail: default is the LOCAL test SMTP (localhost, preview_smtp.py writes .eml files). Real SES needs BOTH --ses and a
-non-empty SEND_ALLOWED_RECIPIENTS (comma list; recipients not on it are dropped and logged), unless SEND_ALLOW_ALL_UAT=1 on the UAT Tableau host (D-050). Env (D-043, provider-neutral): MAIL_TRANSPORT=local|smtp,
+non-empty SEND_ALLOWED_RECIPIENTS (comma list; recipients not on it are dropped and logged), unless SEND_TO_ALL_SUBSCRIBERS=1 on the configured Tableau host (D-050). Env (D-043, provider-neutral): MAIL_TRANSPORT=local|smtp,
 SMTP_PROVIDER=ses|gmail|generic, SMTP_HOST, SMTP_PORT (587, STARTTLS), SMTP_USER, SMTP_PASSWORD, SEND_FROM (SES_SMTP_* are accepted aliases).
 With local transport a delivered mail ends as 'Released' instead of 'Sent' (a test delivery must not use up the real
 day's slot); tests of the Sent path switch that off.
@@ -154,7 +154,7 @@ class Config:
     sender: str = ""
     alert_to: str = DEFAULT_ALERT_TO
     allow: frozenset = frozenset()
-    allow_all: bool = False             # D-050: SEND_ALLOW_ALL_UAT=1 on the UAT Tableau host: every subscriber address is allowed
+    allow_all: bool = False             # D-050: SEND_TO_ALL_SUBSCRIBERS=1 on the configured Tableau host: every subscriber address is allowed
     size_warn: int = SIZE_WARN_MB * 1024 * 1024
     size_limit: int = SIZE_LIMIT_MB * 1024 * 1024
     claim_timeout_min: int = CLAIM_TIMEOUT_MIN
@@ -1169,7 +1169,7 @@ def fatal(cfg, mailer, what):
     """The run could not start or finish (DWH connect, Tableau sign-in): log a RUN SUMMARY line, try to alert, exit code 1."""
     what = sanitize(what, 200)
     log.error("RUN SUMMARY mode=%s transport=%s FATAL=%s needs_human=1%s", "execute" if cfg.execute else "dry-run",
-              "ses" if cfg.ses else "local", what, " allow_all_uat=1" if cfg.allow_all else "")
+              "ses" if cfg.ses else "local", what, " send_to_all=1" if cfg.allow_all else "")
     if cfg.execute:
         try:
             deliver_alerts(cfg, mailer, sgt_now().date(), [{"sub": "-", "wb": "(whole run)", "code": "startup", "text": what}])
@@ -1269,7 +1269,7 @@ def summary_line(ctx, s):
                 k["mapping_stale"], k["deferred"], k["no_allowed_recipient"], len(ctx.unreadable), len(ctx.format_warnings),
                 s["alerts"], k["not_taken_over"], k["not_paused"], k["repaused_today"], k["deleted_on_tableau"], k["not_due"], k["taken_over_today"],
                 k["rejected"], k["halted"], k["schedule_unknown"], k["deferred_breaker"], int(bool(ctx.breaker)), k["awaiting_sync"],
-                "honour" if ctx.cfg.schedule_enforce else "ignore", bad)) + (" allow_all_uat=1" if ctx.cfg.allow_all else "")
+                "honour" if ctx.cfg.schedule_enforce else "ignore", bad)) + (" send_to_all=1" if ctx.cfg.allow_all else "")
 
 
 def exit_code(ctx, s):
@@ -1321,7 +1321,7 @@ def build_config(a, env):
     if ses and getattr(a, "include_not_taken_over", False):
         raise ConfigError("--include-not-taken-over is for dev/local runs only: real sending is limited to taken-over subscriptions")
     allow = parse_allow(env.get("SEND_ALLOWED_RECIPIENTS"))
-    allow_all = ops.allow_all_uat(env)[1]   # D-050: ignored (False) unless TABLEAU_SERVER_URL is exactly the UAT host
+    allow_all = ops.allow_all_subscribers(env)[1]   # D-050: ignored (False) unless TABLEAU_SERVER_URL is exactly SEND_TO_ALL_HOST
     try:
         mode = ops.schedule_mode(env, getattr(a, "schedule_mode", None))
     except ValueError as e:
@@ -1469,7 +1469,7 @@ def run_sample(a):
         tableau.close()
     line = "RUN SUMMARY sample=1 mode=%s transport=%s sub=%s %s=%s%s" % (
         "execute" if cfg.execute else "dry-run", "ses" if cfg.ses else "local", subs[0].id, "result" if ok else "FAILED", text,
-        " allow_all_uat=1" if cfg.allow_all else "")
+        " send_to_all=1" if cfg.allow_all else "")
     (log.info if ok else log.error)(line)
     if ok and cfg.execute and cfg.ses:
         ops.event_log("t6", "SAMPLE SEND of subscription %s was mailed to a single sample address (sample=1)" % subs[0].id, "INFORMATION")

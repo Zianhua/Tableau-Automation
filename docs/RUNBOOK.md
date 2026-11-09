@@ -35,7 +35,7 @@ Rules that matter:
   word for `smtp`). Set `MAIL_TRANSPORT=smtp` once and every script (t2, t4, t6, t11, daily_summary, and the `--restore` commands) sends its mails and
   alerts for real; nobody has to remember a flag on a task line (`--smtp`, alias `--ses`, still forces it for one run). With `local`, reports AND alerts
   go to a local test sink and **nobody is told about anything**. Every script logs `MAIL TRANSPORT local|smtp ...` as its first lines: check it after
-  every change of the task lines. Real mail also needs `SEND_ALLOWED_RECIPIENTS` (must contain `ALERT_TO`; an exact address list) and `SMTP_USER`/`SMTP_PASSWORD`. The one exception is the UAT-only switch `SEND_ALLOW_ALL_UAT=1` (section 16), which replaces the list on the UAT Tableau server and is ignored everywhere else.
+  every change of the task lines. Real mail also needs `SEND_ALLOWED_RECIPIENTS` (must contain `ALERT_TO`; an exact address list) and `SMTP_USER`/`SMTP_PASSWORD`. The one exception is the UAT-only switch `SEND_TO_ALL_SUBSCRIBERS=1` (section 16), which replaces the list on the one Tableau host named in `SEND_TO_ALL_HOST` and is ignored everywhere else.
 - **Second signal that does not need mail:** every run that ends with a non-zero exit code, every kill-switch run and every long PAT-busy streak also writes
   an entry to the **Windows Application event log, source `TableauAutomation`** (event id 100 error, 101 warning). Register the source once, as an
   administrator: `eventcreate /L APPLICATION /T INFORMATION /ID 1 /SO TableauAutomation /D "registered"`. Then point your monitoring (SCOM, a Task
@@ -262,7 +262,7 @@ ALERT_TO=<the same gmail address>
   (`--size-limit-mb` overrides). Exceeding the daily limit shows up as a 5xx after the message or a lockout; because Gmail has no known-rejection list, such a message stays `Claimed`
   (section 5) until a person checks.
 - **Errors:** a wrong or revoked app password is a 535 at login: the preflight fails before anything is claimed, one alert, exit 1.
-- **The allow-list stays mandatory** (except on the UAT Tableau server with `SEND_ALLOW_ALL_UAT=1`, section 16): real mail needs `SEND_ALLOWED_RECIPIENTS`; during testing it holds only the owner's address, so every other recipient is dropped (and raises the
+- **The allow-list stays mandatory** (except on the Tableau host named in `SEND_TO_ALL_HOST` with `SEND_TO_ALL_SUBSCRIBERS=1`, section 16): real mail needs `SEND_ALLOWED_RECIPIENTS`; during testing it holds only the owner's address, so every other recipient is dropped (and raises the
   `no_allowed_recipient` alert for taken-over subscriptions).
 - Tests never connect to `smtp.gmail.com`: the check files fail on any non-loopback SMTP connection and use a local stub server.
 
@@ -331,28 +331,31 @@ Running it again replaces the tasks; a task that was Disabled stays Disabled, an
 
 **Unregister:** `.\scripts\schedule\register_tasks.ps1 -Unregister` (add `-WhatIf` to preview). Removes the five tasks only.
 
-## 16. UAT: mail every subscriber without an allow-list (SEND_ALLOW_ALL_UAT, D-050)
+## 16. Mail every subscriber without an allow-list (SEND_TO_ALL_SUBSCRIBERS, D-050, generalised D-082)
 
-**What it does.** On the UAT Tableau server only, anyone who is a subscriber of a subscription the script has taken over gets the mail. You do not maintain `SEND_ALLOWED_RECIPIENTS` there; it may be empty or missing. If it is filled in, it is not applied while the switch is on.
+**What it does.** On the one Tableau server named in `SEND_TO_ALL_HOST` (UAT or production), anyone who is a subscriber of a subscription the script has taken over gets the mail. You do not maintain `SEND_ALLOWED_RECIPIENTS` there; it may be empty or missing. If it is filled in, it is not applied while the switch is on.
 
 **Turn it on.** Add this line to `.env` on the host:
 
-    SEND_ALLOW_ALL_UAT=1
+    SEND_TO_ALL_SUBSCRIBERS=1
+    SEND_TO_ALL_HOST=<host of TABLEAU_SERVER_URL, without http:// or port>
+
+The old names `SEND_ALLOW_ALL_UAT` and `UAT_TABLEAU_HOST` still work when the new ones are not set (the new ones win).
 
 **Turn it off.** Delete the line or set it to `0`. The normal rule applies again: real sending needs a non-empty `SEND_ALLOWED_RECIPIENTS`, and recipients not on it are dropped.
 
 **Safety rules built in**
-- It only works when `TABLEAU_SERVER_URL` has the host `tableau-uat.example.com` exactly. On any other host (production, a look-alike name, an address with extra text before an `@`) it is ignored, and every script logs a WARNING saying the switch was set but ignored.
+- It only works when `TABLEAU_SERVER_URL` has the host named in `SEND_TO_ALL_HOST` exactly, and only if that variable is set. On any other host (a copied `.env` pointing elsewhere, a look-alike name, an address with extra text before an `@`) it is ignored, and every script logs a WARNING saying the switch was set but ignored.
 - It does not make anything send by itself. Real mail still needs `--execute`, `MAIL_TRANSPORT=smtp` (or `--smtp`) and the SMTP user and password. Takeover is still limited by the workbook or subscription ids, `--owner-user-id` and the new-takeover cap.
 - `ALERT_TO` must still be a valid e-mail address (it does not have to be on a list). A malformed subscriber address is dropped and counted as "dropped_by_allow_list" in the log.
 
-**How to see it is on.** Every script that can send mail logs `SEND_ALLOW_ALL_UAT=1 is ON ...` as a WARNING at startup. Each RUN SUMMARY line ends with `allow_all_uat=1`, and the daily summary mail starts with a NOTE line. If the summary line has no marker, the switch is off or was ignored.
+**How to see it is on.** Every script that can send mail logs `SEND_TO_ALL_SUBSCRIBERS=1 is ON ...` as a WARNING at startup. Each RUN SUMMARY line ends with `send_to_all=1`, and the daily summary mail starts with a NOTE line. If the summary line has no marker, the switch is off or was ignored.
 
-**Do not use it in production.** Production keeps the allow-list (an exact list of addresses). Open question for the production preflight: D-052 item 5 says production should also mail whoever is subscribed in Tableau and that this switch is to be extended to the production host; until that is decided and built, the switch only works on the UAT host.
+**Production.** The user decided (2026-11-04) that production mails every subscriber, so set both lines in the production `.env` with the production host. Every script then logs the WARNING at startup and every RUN SUMMARY ends with `send_to_all=1`. With the switch on, the takeover allow-list (`--subscription-ids` or `--workbooks`, plus `--owner-user-id`) is the real safety control: start with one pilot subscription you own. Not yet tried on a production host.
 
 **Log files and retention (D-051).** Each script writes one log file per day, named with the date, and deletes its own log files older than 7 days when it starts (change with `LOG_RETENTION_DAYS` in `.env`, minimum 1). Only files named `<script>_<yyyy-mm-dd>.log` of that script in `out/` are removed, plus the old `<script>.log` and `<script>.log.1..3` files left from earlier versions once they are older than the window. A file that is in use is skipped. Last-run markers, alert state, the kill file and the database send log are never touched: the send log in the database is what stops a double send and is not pruned.
 
-**Startup warning (checked):** every script that can send mail (t2, t4, t6, t11, daily_summary) logs the `SEND_ALLOW_ALL_UAT=1 is ON` WARNING right after it starts logging, before the kill-switch check, so it also appears in a run that stops at the kill switch. A check starts the real scripts and looks for that line.
+**Startup warning (checked):** every script that can send mail (t2, t4, t6, t11, daily_summary) logs the `SEND_TO_ALL_SUBSCRIBERS=1 is ON` WARNING right after it starts logging, before the kill-switch check, so it also appears in a run that stops at the kill switch. A check starts the real scripts and looks for that line.
 
 ## 17. Reports with a file or other-database source (D-053)
 
@@ -379,7 +382,7 @@ Use it to see the real email format today, for example for a subscription the sc
 - **Exactly one** subscription id and **exactly one** plain address. A list, a comma, a space, `--workbook` or a second id is refused (exit 1, nothing done).
 - The mail goes **only** to `--sample-to`. The subscriber's address is not even read from Tableau. The subject is the real subject with the prefix `[SAMPLE] `; the export, PDF, inline images, heading and message are built by the same code as a real send.
 - It skips the takeover-day guard, the schedule check, the readiness and freshness gates and the taken-over requirement. It still needs: the subscription active in the mapping and present in Tableau, a mapping sync newer than the age limit, the kill switch off, the Tableau token free (otherwise try again in a few minutes), the size limit, and for a real mail `--execute` plus `--smtp` (or `MAIL_TRANSPORT=smtp`) and SMTP credentials. Without `--execute` it only exports and reports the size; with local transport it writes the local test mail.
-- Allow-list: on UAT with `SEND_ALLOW_ALL_UAT=1` the address needs no list entry; anywhere else it must be on `SEND_ALLOWED_RECIPIENTS`.
+- Allow-list: with `SEND_TO_ALL_SUBSCRIBERS=1` on the configured host the address needs no list entry; anywhere else it must be on `SEND_ALLOWED_RECIPIENTS`.
 - **No send-log row is written**, so the real send of the same subscription the same day is not blocked and not affected. The log gets one `RUN SUMMARY sample=1 ...` line, a real mail also writes one information entry to the Windows Event Log. A failure is printed on the console (`SAMPLE FAILED: ...`, exit 1); no alert mail is sent and the normal last-run marker and daily summary are not touched.
 - Running it twice sends two mails: that is up to you.
 

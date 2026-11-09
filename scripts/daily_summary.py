@@ -11,7 +11,7 @@ Mail goes to ALERT_TO (default OWNER_EMAIL) through t6's mail path and allow-lis
 Usage:
   python scripts/daily_summary.py                      # print the summary
   python scripts/daily_summary.py --execute            # mail it to the local test sink
-  python scripts/daily_summary.py --execute --smtp     # REAL mail (needs SMTP_* and SEND_ALLOWED_RECIPIENTS containing ALERT_TO; on UAT SEND_ALLOW_ALL_UAT=1 replaces the list, ALERT_TO must still be a valid address)
+  python scripts/daily_summary.py --execute --smtp     # REAL mail (needs SMTP_* and SEND_ALLOWED_RECIPIENTS containing ALERT_TO; with SEND_TO_ALL_SUBSCRIBERS=1 on the configured host it replaces the list, ALERT_TO must still be a valid address)
 Exit code 0 normally; 1 when the summary itself could not be built or sent.
 """
 import argparse
@@ -70,7 +70,7 @@ def script_status(now, stale_min, env=os.environ):
 
 
 def collect(cur, today, now, stale_min=90, env=os.environ):
-    d = {"today": today, "scripts": script_status(now, stale_min, env), "allow_all_uat": ops.allow_all_uat(env)[1]}
+    d = {"today": today, "scripts": script_status(now, stale_min, env), "send_to_all": ops.allow_all_subscribers(env)[1]}
     d["kill"] = ops.kill_switch_active(env)
     d["sent"] = cur.execute(
         "SELECT ISNULL((SELECT TOP 1 w.Workbook_Name FROM Integration.Tableau_WorkbookDataSource w WHERE w.Workbook_id = s.Workbook_id "
@@ -143,8 +143,8 @@ def render(d):
     L = ["Tableau subscription automation - daily summary for %s" % d["today"], ""]
     if d["kill"][0]:
         L += ["!! KILL SWITCH IS ACTIVE (%s): the scripts do nothing and taken-over subscriptions stay paused." % d["kill"][1], ""]
-    if d.get("allow_all_uat"):
-        L += ["NOTE: SEND_ALLOW_ALL_UAT is ON (UAT Tableau): the recipient allow-list is not applied; every subscriber of a taken-over subscription gets the mail.", ""]
+    if d.get("send_to_all"):
+        L += ["NOTE: SEND_TO_ALL_SUBSCRIBERS is ON: the recipient allow-list is not applied; every subscriber of a taken-over subscription gets the mail.", ""]
     L.append("SCRIPTS (from the last-run markers on this host)")
     for name, label, txt, bad in d["scripts"]:
         L.append("  %s%-4s %-16s %s" % ("!! " if bad else "   ", name, label, txt))

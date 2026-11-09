@@ -768,10 +768,10 @@ def test_ops():
     r = subprocess.run([sys.executable, str(ROOT / "scripts" / "t11_pause.py"), "--restore", "x"], capture_output=True, text=True, env=senv, timeout=60)
     check("t11 --restore ignores the kill switch (a rollback must always work)", "KILL SWITCH" not in (r.stdout + r.stderr) and r.returncode == 1)
     # D-050: each sending script logs the allow-all warning at startup (real entry points, stopped by the kill switch right after)
-    uenv = dict(senv, UAT_TABLEAU_HOST="tableau-uat.example.com", SEND_ALLOW_ALL_UAT="1", TABLEAU_SERVER_URL="http://tableau-uat.example.com:8000/")
+    uenv = dict(senv, SEND_TO_ALL_HOST="tableau-uat.example.com", SEND_TO_ALL_SUBSCRIBERS="1", TABLEAU_SERVER_URL="http://tableau-uat.example.com:8000/")
     for script, args in (("t2_mapping_sync.py", ["--dry-run"]), ("t4_refresh.py", []), ("t6_send.py", []), ("t11_pause.py", [])):
         r = subprocess.run([sys.executable, str(ROOT / "scripts" / script)] + args, capture_output=True, text=True, env=uenv, timeout=60)
-        check("%s: logs the SEND_ALLOW_ALL_UAT warning at startup (UAT host)" % script, "SEND_ALLOW_ALL_UAT=1 is ON" in (r.stdout + r.stderr), (r.stdout + r.stderr)[-200:])
+        check("%s: logs the SEND_TO_ALL_SUBSCRIBERS warning at startup (UAT host)" % script, "SEND_TO_ALL_SUBSCRIBERS=1 is ON" in (r.stdout + r.stderr), (r.stdout + r.stderr)[-200:])
     r = subprocess.run([sys.executable, str(ROOT / "scripts" / "t6_send.py")], capture_output=True, text=True,
                        env=dict(uenv, TABLEAU_SERVER_URL="https://prod.example.com/"), timeout=60)
     check("t6_send.py: on another host the warning says the switch is IGNORED", "IGNORED" in (r.stdout + r.stderr) and "is ON" not in (r.stdout + r.stderr))
@@ -780,14 +780,14 @@ def test_ops():
     ops.log.addHandler(cap)
     ops.log.setLevel(logging.ERROR)
     ses_env = {"SES_SMTP_USER": "u", "SES_SMTP_PASSWORD": "p", "SEND_ALLOWED_RECIPIENTS": "someone@example.org",
-               "OWNER_EMAIL": "you@example.com", "UAT_TABLEAU_HOST": "tableau-uat.example.com"}
+               "OWNER_EMAIL": "you@example.com", "SEND_TO_ALL_HOST": "tableau-uat.example.com"}
     cfg = ops.alert_config(True, ses_env, "x")
     check("alert recipient NOT on the allow-list: loud ERROR, returns False", ops.check_alert_recipient(cfg, "t6") is False and any("ALERT RECIPIENT NOT ON ALLOW-LIST" in l for l in cap.lines))
     cfg = ops.alert_config(True, dict(ses_env, SEND_ALLOWED_RECIPIENTS="you@example.com"), "x")
     check("alert recipient on the allow-list (case-insensitive): fine", ops.check_alert_recipient(cfg, "t6") is True)
     check("local transport: nothing to check", ops.check_alert_recipient(ops.alert_config(False, {}, "x"), "t6") is True)
-    # SEND_ALLOW_ALL_UAT (D-050): alert recipient needs a valid address, not a list entry; only on the exact UAT host
-    uat_env = dict(ses_env, SEND_ALLOWED_RECIPIENTS="", SEND_ALLOW_ALL_UAT="1", TABLEAU_SERVER_URL="http://tableau-uat.example.com:8000/",
+    # SEND_TO_ALL_SUBSCRIBERS (D-050): alert recipient needs a valid address, not a list entry; only on the exact UAT host
+    uat_env = dict(ses_env, SEND_ALLOWED_RECIPIENTS="", SEND_TO_ALL_SUBSCRIBERS="1", TABLEAU_SERVER_URL="http://tableau-uat.example.com:8000/",
                    ALERT_TO="team@example.com")
     cfg = ops.alert_config(True, uat_env, "x")
     check("allow-all on UAT: alert recipient not on any list is fine", ops.check_alert_recipient(cfg, "t6") is True and cfg.allow_all)
@@ -808,8 +808,8 @@ def test_ops():
     d0 = {"today": dt.date(2026, 10, 26), "scripts": [], "kill": (False, ""), "sent": [], "released": 0, "not_sent": [], "refresh": [],
           "repaused": [], "halted": [], "errors_send": [], "old_claims": [], "t6_counters": {}}
     check("daily summary: a note when the switch is effective, nothing otherwise",
-          "SEND_ALLOW_ALL_UAT is ON" in ds_.render(dict(d0, allow_all_uat=True)) and "SEND_ALLOW_ALL_UAT" not in ds_.render(d0)
-          and ds_.attention(dict(d0, allow_all_uat=True)) == ds_.attention(d0))
+          "SEND_TO_ALL_SUBSCRIBERS is ON" in ds_.render(dict(d0, send_to_all=True)) and "SEND_TO_ALL_SUBSCRIBERS" not in ds_.render(d0)
+          and ds_.attention(dict(d0, send_to_all=True)) == ds_.attention(d0))
     ops.log.removeHandler(cap)
     # markers
     e2 = mail_env("markers")
@@ -1404,7 +1404,7 @@ def main():
     os.environ.setdefault('LOG_DIR', tempfile.mkdtemp(prefix='logs_'))   # tests never write the real out/*.log
     os.environ['LASTRUN_DIR'] = str(TMP / 'lastrun_default')   # never write real last-run markers
     os.environ['OPS_STATE_DIR'] = str(TMP / 'state_default')
-    for k in [k for k in os.environ if k.startswith(("SES_", "SMTP_"))] + ["SEND_ALLOWED_RECIPIENTS", "SEND_FROM", "ALERT_TO", "MAIL_TRANSPORT", "ADDR_HASH_SALT", "SCHEDULE_MODE", "SEND_ALLOW_ALL_UAT", "TABLEAU_AUTOMATION_DISABLED"]:
+    for k in [k for k in os.environ if k.startswith(("SES_", "SMTP_"))] + ["SEND_ALLOWED_RECIPIENTS", "SEND_TO_ALL_SUBSCRIBERS", "SEND_ALLOW_ALL_UAT", "SEND_TO_ALL_HOST", "UAT_TABLEAU_HOST", "SEND_FROM", "ALERT_TO", "MAIL_TRANSPORT", "ADDR_HASH_SALT", "SCHEDULE_MODE", "TABLEAU_AUTOMATION_DISABLED"]:
         os.environ.pop(k, None)
     real_smtp = smtplib.SMTP
 

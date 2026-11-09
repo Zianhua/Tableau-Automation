@@ -29,7 +29,7 @@ Environment-specific values are not hard-coded. The Python and PowerShell script
 | Key | Used for |
 |---|---|
 | `DEV_DWH_SERVER`, `DEV_DWH_DATABASE` | dev DWH guard of the mapping sync and refresh scripts, and the concurrency test; they refuse any other server or database |
-| `UAT_TABLEAU_HOST` | `SEND_ALLOW_ALL_UAT` only takes effect when the host of `TABLEAU_SERVER_URL` equals this exactly |
+| `SEND_TO_ALL_HOST` | `SEND_TO_ALL_SUBSCRIBERS` only takes effect when the host of `TABLEAU_SERVER_URL` equals this exactly |
 | `OWNER_EMAIL` | default alert recipient when `ALERT_TO` is unset |
 | `DEFAULT_SENDER_EMAIL` | display From address when `SEND_FROM` is unset |
 

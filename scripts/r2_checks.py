@@ -722,7 +722,7 @@ def main():
     os.environ["LASTRUN_DIR"] = str(TMP / "lastrun_default")
     os.environ["OPS_STATE_DIR"] = str(TMP / "state_default")
     os.environ["EVENTLOG_DISABLED"] = "1"
-    for k in [k for k in os.environ if k.startswith(("SES_", "SMTP_"))] + ["SEND_ALLOWED_RECIPIENTS", "SEND_ALLOW_ALL_UAT", "SEND_FROM", "ALERT_TO", "SCHEDULE_MODE",
+    for k in [k for k in os.environ if k.startswith(("SES_", "SMTP_"))] + ["SEND_ALLOWED_RECIPIENTS", "SEND_TO_ALL_SUBSCRIBERS", "SEND_ALLOW_ALL_UAT", "SEND_TO_ALL_HOST", "UAT_TABLEAU_HOST", "SEND_FROM", "ALERT_TO", "SCHEDULE_MODE",
                                                                          "TABLEAU_AUTOMATION_DISABLED", "MAIL_TRANSPORT", "ADDR_HASH_SALT"]:
         os.environ.pop(k, None)
     real_smtp = smtplib.SMTP

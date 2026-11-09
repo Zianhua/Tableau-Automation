@@ -14,8 +14,8 @@
   every PAT-busy / kill-switch alert, writes an entry with source TableauAutomation (eventcreate; guarded, never raises; set
   EVENTLOG_DISABLED=1 to turn off). The first write of a new source needs an elevated account: register it once (RUNBOOK).
 - Alert recipient check: warns loudly at startup when ALERT_TO is not on SEND_ALLOWED_RECIPIENTS with real SES.
-- SEND_ALLOW_ALL_UAT=1 (D-050): no allow-list, effective only when TABLEAU_SERVER_URL's host is exactly the UAT host. Warned at startup
-  (log_transport) and marked in the RUN SUMMARY lines (allow_all_uat=1).
+- SEND_TO_ALL_SUBSCRIBERS=1 (D-050; old name SEND_ALLOW_ALL_UAT): no allow-list, effective only when TABLEAU_SERVER_URL's host is exactly SEND_TO_ALL_HOST (old name UAT_TABLEAU_HOST). Warned at startup
+  (log_transport) and marked in the RUN SUMMARY lines (send_to_all=1).
 """
 import datetime as dt
 import json
@@ -183,8 +183,10 @@ def default_size_limit_mb(env=os.environ):
     return 20 if smtp_provider(env) == "gmail" else 25
 
 
-UAT_HOST_VAR = "UAT_TABLEAU_HOST"
-ALLOW_ALL_VAR = "SEND_ALLOW_ALL_UAT"
+ALL_VAR = "SEND_TO_ALL_SUBSCRIBERS"        # new name (D-050 was SEND_ALLOW_ALL_UAT)
+ALL_HOST_VAR = "SEND_TO_ALL_HOST"              # new name (was UAT_TABLEAU_HOST)
+LEGACY_ALL_VAR = "SEND_ALLOW_ALL_UAT"          # old names still work when the new ones are unset
+LEGACY_ALL_HOST_VAR = "UAT_TABLEAU_HOST"
 
 
 def server_host(env=os.environ):
@@ -199,20 +201,25 @@ def server_host(env=os.environ):
         return None
 
 
-def uat_host(env=os.environ):
-    """Lower-case UAT Tableau host from UAT_TABLEAU_HOST (.env), or None when unset: the allow-all switch is then never effective."""
-    return (env.get(UAT_HOST_VAR) or "").strip().lower() or None
+def all_host(env=os.environ):
+    """Lower-case Tableau host the send-to-all switch is tied to (SEND_TO_ALL_HOST, else the old UAT_TABLEAU_HOST), or None when unset:
+    the switch is then never effective."""
+    return (env.get(ALL_HOST_VAR) or env.get(LEGACY_ALL_HOST_VAR) or "").strip().lower() or None
 
 
-def allow_all_uat(env=os.environ):
-    """(requested, effective) for the SEND_ALLOW_ALL_UAT switch (D-050). Effective only when the Tableau host is exactly the UAT host."""
-    requested = str(env.get(ALLOW_ALL_VAR, "")).strip().lower() in ("1", "true", "yes", "on")
-    return requested, requested and uat_host(env) is not None and server_host(env) == uat_host(env)
+def allow_all_subscribers(env=os.environ):
+    """(requested, effective) for the send-to-all-subscribers switch (SEND_TO_ALL_SUBSCRIBERS, else the old SEND_ALLOW_ALL_UAT).
+    Effective only when the host of TABLEAU_SERVER_URL is exactly the host named in SEND_TO_ALL_HOST (any environment, UAT or production)."""
+    raw = env.get(ALL_VAR)
+    if raw is None or str(raw).strip() == "":
+        raw = env.get(LEGACY_ALL_VAR, "")
+    requested = str(raw).strip().lower() in ("1", "true", "yes", "on")
+    return requested, requested and all_host(env) is not None and server_host(env) == all_host(env)
 
 
 def allow_all_marker(env=os.environ):
-    """' allow_all_uat=1' for the RUN SUMMARY lines when the switch is effective, else ''."""
-    return " allow_all_uat=1" if allow_all_uat(env)[1] else ""
+    """' send_to_all=1' for the RUN SUMMARY lines when the switch is effective, else ''."""
+    return " send_to_all=1" if allow_all_subscribers(env)[1] else ""
 
 
 def log_transport(script, ses, execute, env=os.environ):
@@ -220,14 +227,14 @@ def log_transport(script, ses, execute, env=os.environ):
              "alerts and reports go to the REAL mail server" if ses and execute else
              "nothing is sent for real (dry run)" if not execute else
              "LOCAL TEST SINK ONLY - alerts do NOT reach anybody (set MAIL_TRANSPORT=smtp in .env for real mail)")
-    requested, effective = allow_all_uat(env)
+    requested, effective = allow_all_subscribers(env)
     if effective:
-        log.warning("%s=1 is ON for %s: the recipient allow-list is NOT applied on the UAT Tableau server (%s). Every subscriber "
+        log.warning("%s=1 is ON for %s: the recipient allow-list is NOT applied on the Tableau server %s. Every subscriber "
                     "of a taken-over subscription gets the mail once real sending is on (--execute, MAIL_TRANSPORT=smtp).",
-                    ALLOW_ALL_VAR, script, uat_host(env))
+                    ALL_VAR, script, all_host(env))
     elif requested:
         log.warning("%s=1 is set but IGNORED for %s: TABLEAU_SERVER_URL host is %r, not %s. The normal SEND_ALLOWED_RECIPIENTS rules apply.",
-                    ALLOW_ALL_VAR, script, server_host(env), uat_host(env) or "(UAT_TABLEAU_HOST not set)")
+                    ALL_VAR, script, server_host(env), all_host(env) or "(%s not set)" % ALL_HOST_VAR)
 
 
 def salt_warning(env=os.environ):

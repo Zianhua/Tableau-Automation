@@ -746,7 +746,7 @@ def main():
     os.environ.setdefault('LOG_DIR', tempfile.mkdtemp(prefix='logs_'))   # tests never write the real out/*.log
     os.environ['LASTRUN_DIR'] = tempfile.mkdtemp(prefix='lastrun_')   # tests must not write real last-run markers
     os.environ['OPS_STATE_DIR'] = os.environ['LASTRUN_DIR']
-    for k in [k for k in os.environ if k.startswith(("SES_", "SMTP_"))] + ["SEND_ALLOWED_RECIPIENTS", "SEND_ALLOW_ALL_UAT", "SEND_FROM", "ALERT_TO", "MAIL_TRANSPORT", "ADDR_HASH_SALT"]:
+    for k in [k for k in os.environ if k.startswith(("SES_", "SMTP_"))] + ["SEND_ALLOWED_RECIPIENTS", "SEND_TO_ALL_SUBSCRIBERS", "SEND_ALLOW_ALL_UAT", "SEND_TO_ALL_HOST", "UAT_TABLEAU_HOST", "SEND_FROM", "ALERT_TO", "MAIL_TRANSPORT", "ADDR_HASH_SALT"]:
         os.environ.pop(k, None)
     import smtplib
     real_smtp = smtplib.SMTP

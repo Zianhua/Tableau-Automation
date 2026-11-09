@@ -554,7 +554,7 @@ def test_flow(cur, today):
               and mail.sent == [])
         s = run_subs(cur, mk_ctx(cur, today, FakeAdapter(emails=["dropme@example.com"]), mail, ses=True, allow=frozenset()), ["T6TEST-9B"])
         check("allow-list: empty list -> nothing is sent", mail.sent == [] and logrows(cur, "T6TEST-9B") == [])
-        # 9b. SEND_ALLOW_ALL_UAT (D-050): allow_all with an empty list delivers to every subscriber address (fake mailer, nothing leaves)
+        # 9b. SEND_TO_ALL_SUBSCRIBERS (D-050): allow_all with an empty list delivers to every subscriber address (fake mailer, nothing leaves)
         add_sub(cur, "T6TEST-9C")
         mail = FakeMailer()
         ctx = mk_ctx(cur, today, FakeAdapter(emails=["one@example.com", "Two@example.com"]), mail, ses=True, allow=frozenset(), allow_all=True)
@@ -563,7 +563,7 @@ def test_flow(cur, today):
               len(mail.sent) == 1 and sorted(mail.sent[0][2]) == ["Two@example.com", "one@example.com"] and statuses(cur, "T6TEST-9C") == ["Sent"]
               and s["kinds"]["no_allowed_recipient"] == 0)
         check("allow-all: the RUN SUMMARY line carries the marker; without the switch it does not",
-              "allow_all_uat=1" in m.summary_line(ctx, s) and "allow_all_uat" not in m.summary_line(mk_ctx(cur, today, ses=True), s))
+              "send_to_all=1" in m.summary_line(ctx, s) and "send_to_all" not in m.summary_line(mk_ctx(cur, today, ses=True), s))
         # 10. dry run writes nothing
         add_sub(cur, "T6TEST-10")
         before = others_checksum(cur)
@@ -806,24 +806,38 @@ def test_config():
     check("pdf options: maxage=1 is passed", sm.pdf_options("A4", "LANDSCAPE").get_query_params().get("maxAge") == 1)
 
 
+def test_send_to_all_names():
+    """The switch has neutral names (SEND_TO_ALL_SUBSCRIBERS / SEND_TO_ALL_HOST); the old UAT names still work; works on any host, only if the host matches."""
+    ao = m.ops.allow_all_subscribers
+    prod = {"TABLEAU_SERVER_URL": "https://tableau-prod.example.com/", "SEND_TO_ALL_SUBSCRIBERS": "1", "SEND_TO_ALL_HOST": "tableau-prod.example.com"}
+    check("send-to-all: effective on a non-UAT host named in SEND_TO_ALL_HOST", ao(prod) == (True, True))
+    check("send-to-all: host mismatch = requested but not effective", ao(dict(prod, SEND_TO_ALL_HOST="other.example.com")) == (True, False))
+    check("send-to-all: no host set = never effective", ao({k: v for k, v in prod.items() if k != "SEND_TO_ALL_HOST"}) == (True, False))
+    old = {"TABLEAU_SERVER_URL": "http://uat.example.com:8000/", "SEND_ALLOW_ALL_UAT": "1", "UAT_TABLEAU_HOST": "uat.example.com"}
+    check("send-to-all: the old UAT names still work", ao(old) == (True, True))
+    check("send-to-all: the new name wins over the old one", ao(dict(old, SEND_TO_ALL_SUBSCRIBERS="0")) == (False, False))
+    check("send-to-all: the new host name wins over the old one", ao(dict(old, SEND_TO_ALL_HOST="x.example.com")) == (True, False))
+    check("send-to-all: marker text", m.ops.allow_all_marker(prod) == " send_to_all=1" and m.ops.allow_all_marker(old) == " send_to_all=1")
+
+
 def test_allow_all_uat():
     """D-050: the switch is effective only on the exact UAT host; every case builds a Config from a plain dict (no network, no mail)."""
     UAT = "http://tableau-uat.example.com:8000/"
-    creds = {"SMTP_USER": "u", "SMTP_PASSWORD": "p", "MAIL_TRANSPORT": "smtp", "UAT_TABLEAU_HOST": "tableau-uat.example.com", "OWNER_EMAIL": "you@example.com"}
+    creds = {"SMTP_USER": "u", "SMTP_PASSWORD": "p", "MAIL_TRANSPORT": "smtp", "SEND_TO_ALL_HOST": "tableau-uat.example.com", "OWNER_EMAIL": "you@example.com"}
 
     def build(env, execute=True):
         try:
             return m.build_config(ns(execute=execute), dict(creds, **env)), None
         except m.ConfigError as e:
             return None, str(e)
-    on = {"SEND_ALLOW_ALL_UAT": "1", "TABLEAU_SERVER_URL": UAT, "UAT_TABLEAU_HOST": "tableau-uat.example.com"}
+    on = {"SEND_TO_ALL_SUBSCRIBERS": "1", "TABLEAU_SERVER_URL": UAT, "SEND_TO_ALL_HOST": "tableau-uat.example.com"}
     c, e = build(on)
     check("allow-all: switch on + UAT host + empty list is accepted for real sending", c is not None and c.ses and c.allow_all and not c.allow)
     c, e = build(dict(on, TABLEAU_SERVER_URL="HTTP://tableau-uat.example.com/"))
     check("allow-all: host compare is case-insensitive and ignores scheme and port", c is not None and c.allow_all)
     c, e = build(dict(on, SEND_ALLOWED_RECIPIENTS="a@example.com"))
     check("allow-all: switch on beats a non-empty list (allow everybody)", c is not None and c.allow_all and m.filter_allowed(c, ["b@example.com"]) == (["b@example.com"], 0))
-    c, e = build(dict(on, SEND_ALLOW_ALL_UAT="0"))
+    c, e = build(dict(on, SEND_TO_ALL_SUBSCRIBERS="0"))
     check("allow-all: switch off keeps the old rule (empty list refused)", c is None and "Refusing to send for real" in e)
     c, e = build({"TABLEAU_SERVER_URL": UAT})
     check("allow-all: switch missing keeps the old rule (empty list refused)", c is None and "Refusing to send for real" in e)
@@ -874,14 +888,14 @@ def test_allow_all_uat():
         w3 = list(cap.lines)
     finally:
         m.ops.log.removeHandler(cap)
-    check("allow-all: startup WARNING when effective", any("SEND_ALLOW_ALL_UAT=1 is ON" in l for l in w1))
+    check("allow-all: startup WARNING when effective", any("SEND_TO_ALL_SUBSCRIBERS=1 is ON" in l for l in w1))
     check("allow-all: startup WARNING when set but ignored on another host", any("IGNORED" in l for l in w2) and not any("is ON" in l for l in w2))
-    check("allow-all: no allow-all warning when the switch is not set", not any("SEND_ALLOW_ALL_UAT" in l for l in w3))
-    check("allow-all: RUN SUMMARY marker only when effective", m.ops.allow_all_marker(on) == " allow_all_uat=1"
+    check("allow-all: no allow-all warning when the switch is not set", not any("SEND_TO_ALL_SUBSCRIBERS" in l for l in w3))
+    check("allow-all: RUN SUMMARY marker only when effective", m.ops.allow_all_marker(on) == " send_to_all=1"
           and m.ops.allow_all_marker(dict(on, TABLEAU_SERVER_URL="http://x.example/")) == "" and m.ops.allow_all_marker({}) == "")
     for v in ("true", "YES", " on "):
-        check("allow-all: switch value %r counts as on" % v, m.ops.allow_all_uat(dict(on, SEND_ALLOW_ALL_UAT=v))[1])
-    check("allow-all: a junk switch value is off", not any(m.ops.allow_all_uat(dict(on, SEND_ALLOW_ALL_UAT=v))[0] for v in ("2", "enabled", "")))
+        check("allow-all: switch value %r counts as on" % v, m.ops.allow_all_subscribers(dict(on, SEND_TO_ALL_SUBSCRIBERS=v))[1])
+    check("allow-all: a junk switch value is off", not any(m.ops.allow_all_subscribers(dict(on, SEND_TO_ALL_SUBSCRIBERS=v))[0] for v in ("2", "enabled", "")))
     # preflight recipient with an empty list
     c, e = build(on)
     check("allow-all: the SMTP preflight recipient is ALERT_TO when the list is empty", m.preflight_rcpt(c) == c.alert_to)
@@ -1379,7 +1393,7 @@ def main():
     os.environ['LASTRUN_DIR'] = tempfile.mkdtemp(prefix='lastrun_')   # tests must not write real last-run markers
     os.environ['OPS_STATE_DIR'] = os.environ['LASTRUN_DIR']
     # NO test may reach SES, whatever the environment holds: clear every sending setting and refuse any non-loopback SMTP host.
-    for k in [k for k in os.environ if k.startswith(("SES_", "SMTP_"))] + ["SEND_ALLOWED_RECIPIENTS", "SEND_FROM", "ALERT_TO", "MAIL_TRANSPORT", "ADDR_HASH_SALT", "SEND_ALLOW_ALL_UAT"]:
+    for k in [k for k in os.environ if k.startswith(("SES_", "SMTP_"))] + ["SEND_ALLOWED_RECIPIENTS", "SEND_TO_ALL_SUBSCRIBERS", "SEND_ALLOW_ALL_UAT", "SEND_TO_ALL_HOST", "UAT_TABLEAU_HOST", "SEND_FROM", "ALERT_TO", "MAIL_TRANSPORT", "ADDR_HASH_SALT", "SEND_ALLOW_ALL_UAT"]:
         os.environ.pop(k, None)
     real_smtp = smtplib.SMTP
 
@@ -1401,6 +1415,7 @@ def main():
         test_smtp_tls()
         test_config()
         test_allow_all_uat()
+        test_send_to_all_names()
         test_log_retention()
         test_logging_handlers()
         test_alert_state(cur, today)
