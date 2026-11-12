@@ -12,7 +12,15 @@ Same install as UAT ([DEPLOYMENT_UAT.md](DEPLOYMENT_UAT.md)); only `.env` differ
 
 ## 1. Get the code
 
-From the GitLab branch `tableau-subscription-automation` of `server-automation/tableau-extract-and-maintenance`, folder `tableau_subscription_automation`, into the install folder (for example `<INSTALL_DIR>\TableauSubscriptionAutomation`). Not from the public GitHub copy (its values are blanked). The test suites are not part of the branch and must never be copied to production.
+Download the folder `tableau_subscription_automation` from the GitLab branch `tableau-subscription-automation` of `server-automation/tableau-extract-and-maintenance` (not the public GitHub copy: its values are blanked) to any temporary place on the host, for example `C:\temp\tableau_subscription_automation`. The legacy extract job (`executables_tableau_extract`, `batch_files`, `log` and its two scheduled tasks) stays where it is and is never changed. In an elevated PowerShell, from that downloaded folder:
+
+```powershell
+.\scripts\schedule\install_on_host.ps1 -CheckOnly                  # read-only: finds the legacy job and its folder, checks Python, ODBC, time zone, PyPI
+.\scripts\schedule\install_on_host.ps1                             # copies the solution into <legacy root>\TableauSubscriptionAutomation
+.\scripts\schedule\install_on_host.ps1 -LegacyRoot <INSTALL_DIR>   # if the check found no folder or more than one
+```
+
+It installs into a NEW subfolder next to the legacy folders (never into them), never copies `.env` or test suites, saves the legacy task definitions in `out\legacy_snapshot`, and proves that every legacy file and task is unchanged afterwards. For a later code update use `-Update` (keeps `.env`, `out\` and `.venv`).
 
 ## 2. `.env` (copy `.env.example`, keep it off mail and chat)
 
@@ -34,7 +42,7 @@ From the GitLab branch `tableau-subscription-automation` of `server-automation/t
 ## 3. Install, dry run only
 
 ```powershell
-cd <install folder>
+cd <legacy root>\TableauSubscriptionAutomation
 .\scripts\schedule\deploy_uat.ps1 -ServiceAccount '<DOMAIN\service account in <SERVICE_DB_ROLE>>'
 ```
 
