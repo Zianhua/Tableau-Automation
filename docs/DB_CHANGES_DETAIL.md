@@ -45,7 +45,7 @@ Requirements on the SQL Server instance: SQL Server 2017 or later (`STRING_AGG`)
 
 ## 3. Order of application and dependencies
 
-**Note: the creation scripts named below (T1_mapping_schema, R1, R4, R5, R8, T11_pause_schema, ExtractAuto_schema) have been removed from the repo. The database objects are no longer shipped in this repo: they are created from the DBJR document (ITSC_384043_TableauEnhancement_ML). Only the rollback scripts, T3_load_registry.sql and the dev-only test files remain in scripts/sql/. The table is kept as the order and dependency reference.**
+**Note: the creation scripts named below (T1_mapping_schema, R1, R4, R5, R8, T11_pause_schema, ExtractAuto_schema) have been removed from the repo. The database objects are no longer shipped in this repo: they are created from the DBJR document (ITSC_0003_TableauEnhancement_ML). Only the rollback scripts, T3_load_registry.sql and the dev-only test files remain in scripts/sql/. The table is kept as the order and dependency reference.**
 
 **Apply the SQL BEFORE the code is deployed.** The new code needs the new objects: `t2_mapping_sync.py` checks its tables and columns at start (`schema_ready`: a missing one is a fatal error, mail `t2_failed`, nothing written) and `extract_takeover.py` refuses to start (fatal, exit 1) unless `Tableau_ExtractTask`, `Tableau_ExtractTaskBackup` and its columns `NoRetake` and `OldJobMappingIds` exist. The reverse order (rollback) is code first, SQL second (12.4).
 

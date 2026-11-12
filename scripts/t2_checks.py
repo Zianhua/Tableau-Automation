@@ -95,6 +95,8 @@ def child_env():
 
 
 def main():
+    import testguard  # noqa: E402  dev warehouse only, whatever .env says
+    testguard.require_dev()
     os.environ["EVENTLOG_DISABLED"] = "1"
     cur = m.connect().cursor()
     exp = expected()

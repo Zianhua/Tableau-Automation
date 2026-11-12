@@ -513,7 +513,8 @@ def test_takeover():
         ctx, _ = go(cc, srv)
         check("a task on a disabled schedule is taken over exactly like one on an enabled schedule", ctx.n["neutralised"] == 1 and srv.deleted == [TASK] and len(backup(cc)) == 1, dict(ctx.n))
         check("... no alert item is raised for it", not ctx.events and not [x for x in t4.taken_over_problems(cc, TUE) if x[0] == DS and x[2] != "takeover_missed"])
-        due, _n = t4.extract_due(cc, dt.date(2026, 11, 10))   # a Tuesday after the takeover (which happens 'now')
+        nxt = dt.date.today() + dt.timedelta(days=(1 - dt.date.today().weekday()) % 7 or 7)   # the next Tuesday after the takeover ('now')
+        due, _n = t4.extract_due(cc, nxt)
         check("... t4 computes its due days from the schedule's recurrence (Tuesday is a day of the fixture schedule)", DS in due)
         ctx2 = m.Ctx(cfg(execute=True), srv, cc, TUE)
         failed = m.restore(ctx2, [TASK], False)
@@ -597,6 +598,20 @@ def test_takeover():
         m.restore(ctx, [TASK], False)
         check("restore adopts an existing task for the same extract and schedule instead of creating a duplicate", not srv.added and backup(cc)[0][3] == "HUMAN-1", backup(cc))
     scenario(restore_adopt_and_fail)
+
+    def restore_deferred(cc):
+        srv = fresh_server()
+        go(cc, srv)
+        cc.execute("INSERT Integration.Tableau_RefreshJob (DataSource_id, TableauJobId, SubmittedDate, FinishedAt, Status, Message) "
+                   "VALUES (?, 'EXTRTEST-JOB', ?, SYSDATETIMEOFFSET(), 'Succeeded', 'test')", DS, TUE.isoformat())
+        ctx = m.Ctx(cfg(execute=True), srv, cc, TUE)
+        failed = m.restore(ctx, [TASK], False)
+        check("restore on a day the script already refreshed the extract is refused (old job / Tableau would refresh it a second time): row stays open",
+              failed == 1 and not srv.added and backup(cc)[0][2] is None and any(e["code"] == "restore_deferred" for e in ctx.events))
+        ctx = m.Ctx(cfg(execute=True, force=True), srv, cc, TUE)
+        failed = m.restore(ctx, [TASK], False)
+        check("... and --force restores it anyway", failed == 0 and len(srv.added) == 1 and backup(cc)[0][2] is not None)
+    scenario(restore_deferred)
 
     def restore_fails(cc):
         srv = fresh_server()
@@ -1241,6 +1256,8 @@ def test_sql_files():
 
 
 def main():
+    import testguard  # noqa: E402  dev warehouse only, whatever .env says
+    testguard.require_dev()
     os.environ["EVENTLOG_DISABLED"] = "1"
     os.environ.setdefault("LOG_DIR", tempfile.mkdtemp(prefix="logs_"))
     os.environ["LASTRUN_DIR"] = tempfile.mkdtemp(prefix="lastrun_")

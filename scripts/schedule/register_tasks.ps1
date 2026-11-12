@@ -278,11 +278,12 @@ foreach ($d in $definitions) {
     if ($PSCmdlet.ShouldProcess("$TaskPath$($d.Name)", "Register-ScheduledTask as $ServiceAccount ($mode)")) {
         if ($isGmsa) {
             $principal = New-ScheduledTaskPrincipal -UserId $ServiceAccount -LogonType Password -RunLevel Limited
-            Register-ScheduledTask -TaskPath $TaskPath -TaskName $d.Name -InputObject $task -Principal $principal -Force | Out-Null
+            $task.Principal = $principal   # -Principal cannot be combined with -InputObject (other parameter set): set it on the task
+            Register-ScheduledTask -TaskPath $TaskPath -TaskName $d.Name -InputObject $task -Force | Out-Null
         }
         else {
             Register-ScheduledTask -TaskPath $TaskPath -TaskName $d.Name -InputObject $task `
-                -User $ServiceAccount -Password $password -RunLevel Limited -Force | Out-Null
+                -User $ServiceAccount -Password $password -Force | Out-Null   # RunLevel cannot be combined with -InputObject; Limited is the default
         }
         if ($wasDisabled) { Disable-ScheduledTask -TaskPath $TaskPath -TaskName $d.Name | Out-Null }
         Write-Host "registered $TaskPath$($d.Name) ($mode)"

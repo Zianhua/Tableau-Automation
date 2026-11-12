@@ -255,6 +255,7 @@ def mk_gate(**kw):
     g.pipes = {"d1": {"P1": True}}
     g.etl = {"P1": (dt.datetime(2026, 10, 22, 10, 0), True)}
     g.refreshed = {}
+    g.owner_refreshed = set()
     for k, v in kw.items():
         setattr(g, k, v)
     return g
@@ -1076,7 +1077,7 @@ def test_sample_send(cur, today):
 def test_pat_lock(cur):
     c2 = m.t4.connect()
     # own lock name: the real TABLEAU_PAT_SESSION may be held by a real run or another session, which made this test crash with PatBusy
-    a, b = m.t4.LazyTableau(cur, lock_name="T6TEST_PAT_SESSION"), m.t4.LazyTableau(c2.cursor(), lock_name="T6TEST_PAT_SESSION")
+    a, b = m.t4.LazyTableau(cur, lock_name="T6TEST_PAT_SESSION"), m.t4.LazyTableau(c2.cursor(), lock_name="T6TEST_PAT_SESSION", lock_wait_s=2)
     a._lock()
     try:
         b._lock()
@@ -1388,6 +1389,8 @@ def e2e(cur, today):
 
 
 def main():
+    import testguard  # noqa: E402  dev warehouse only, whatever .env says
+    testguard.require_dev()
     os.environ['EVENTLOG_DISABLED'] = '1'
     os.environ.setdefault('LOG_DIR', tempfile.mkdtemp(prefix='logs_'))   # tests never write the real out/*.log
     os.environ['LASTRUN_DIR'] = tempfile.mkdtemp(prefix='lastrun_')   # tests must not write real last-run markers

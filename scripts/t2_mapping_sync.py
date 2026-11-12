@@ -34,7 +34,7 @@ test subscription on a workbook with 2 data sources) is picked up by the next ru
 
 Schedules (R1, D-036): for every subscription the REST schedule object is read (frequency, weekdays, month day(s), start time,
 interval, state) into Integration.Tableau_Schedule, and Tableau_Subscription.ScheduleId. t6/t4 use it to decide what is due.
-The database objects (see the DBJR document, ITSC_384043_TableauEnhancement_ML) must exist first (the script stops with a message if missing).
+The database objects (see the DBJR document, ITSC_0003_TableauEnhancement_ML) must exist first (the script stops with a message if missing).
 R5/F-3: Tableau_Subscription.WorkbookUpdatedAt = the workbook updated_at as read from the REST list at the start of the run (naive UTC);
 t6 compares the live updated_at with it.
 
@@ -56,7 +56,7 @@ the override and is never changed. A dry run prints the difference and writes no
 reported and stay unmapped (their extracts are not refreshed).
 Extract refresh tasks (D-067): the Tableau extract refresh tasks and their schedules are read (read-only) into Integration.Tableau_ExtractTask
 and Integration.Tableau_Schedule; t4 uses them for the extracts whose task extract_takeover.py has taken over.
-Needs the extract/registry objects from the DBJR document (ITSC_384043_TableauEnhancement_ML).
+Needs the extract/registry objects from the DBJR document (ITSC_0003_TableauEnhancement_ML).
 
 Usage:
   python scripts/t2_mapping_sync.py --dry-run     # read everything, print what would change, write nothing
@@ -132,14 +132,14 @@ JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE r.type = 'U'"""
 def connect():
     server, db = os.environ["CONN_SERVER"], os.environ["CONN_DATABASE"]
     if not DEV_SERVER or not DEV_DB or server.lower() != DEV_SERVER or db.lower() != DEV_DB:
-        sys.exit("Refusing to run: only the dev DWH (D-026) is allowed, got %s / %s" % (server, db))
+        sys.exit("Refusing to run: CONN_SERVER / CONN_DATABASE (%s / %s) do not match the warehouse guard DEV_DWH_SERVER / DEV_DWH_DATABASE in .env" % (server, db))
     drv = os.environ["CONN_DRIVER"].strip("{}")
     conn = pyodbc.connect("Driver={%s};Server=%s;Database=%s;Trusted_Connection=yes;TrustServerCertificate=yes"
                           % (drv, server, db))
     sname, dname = conn.cursor().execute("SELECT @@SERVERNAME, DB_NAME()").fetchone()
     if not sname.lower().startswith(DEV_SERVER.split(".")[0]) or dname.lower() != DEV_DB:
         conn.close()
-        sys.exit("Refusing to run: connected to %s / %s, not the dev DWH" % (sname, dname))
+        sys.exit("Refusing to run: connected to %s / %s, which is not the warehouse named in DEV_DWH_SERVER / DEV_DWH_DATABASE (@@SERVERNAME must start with its first part)" % (sname, dname))
     return conn
 
 
@@ -1041,7 +1041,7 @@ def main(argv=None):
         return fail("DWH connect or guard failed: %s" % (e if isinstance(e, SystemExit) else type(e).__name__))
     cur = conn.cursor()
     if not schema_ready(cur):
-        return fail("Integration.Tableau_Schedule / Tableau_Subscription.ScheduleId / WorkbookUpdatedAt / Tableau_DataSource.NonDwhConnection missing: the objects come from the DBJR document (ITSC_384043_TableauEnhancement_ML)")
+        return fail("Integration.Tableau_Schedule / Tableau_Subscription.ScheduleId / WorkbookUpdatedAt / Tableau_DataSource.NonDwhConnection missing: the objects come from the DBJR document (ITSC_0003_TableauEnhancement_ML)")
     tableau = None
     try:
         for attempt in range(LOCK_RETRIES + 1):

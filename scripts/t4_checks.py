@@ -39,9 +39,20 @@ class FakeTableau:
         self.polls_to_finish, self.finish_code, self.fail_submit, self.published = polls_to_finish, finish_code, fail_submit, published
         self.submitted, self.polls, self.job_seq, self.done, self.unreadable, self.bg = [], {}, 0, set(), set(), []
         self.jobs_get_fails = False
+        self.foreign = {}   # job id -> JobItem-like detail of a job someone else submitted (old refresh job)
         self.already_queued = set()  # ds ids for which refresh returns None (Tableau 409 "already queued")
         self.datasources = NS(get_by_id=self._get_ds, refresh=self._refresh)
         self.jobs = NS(get_by_id=self._get_job, get=self._jobs_get)
+        self.owned_tasks = []        # data source ids that have a Tableau extract refresh task on an Active schedule
+        self.tasks_fail = False
+        self.tasks_empty = False
+        self.no_sched = set()        # data source ids whose task comes back without a schedule id
+        self.sched_days = None       # set of weekday numbers for the fake schedule; None = daily
+        self.tasks = NS(get=self._tasks_get)
+        self.schedules = NS(get_by_id=lambda sid: NS(id=sid, name="fake", state="Active", interval_item=NS(
+            _frequency="Weekly" if self.sched_days is not None else "Daily",
+            interval=tuple(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][d] for d in sorted(self.sched_days or ())),
+            start_time=None)))
 
     def __call__(self):
         return self
@@ -65,12 +76,23 @@ class FakeTableau:
         return NS(id=jid)
 
     def _get_job(self, jid):
+        if jid in self.foreign:
+            return self.foreign[jid]
         if jid in self.unreadable or jid not in self.polls:
             raise KeyError("no such job")
         self.polls[jid] += 1
         fin = jid in self.done or (self.polls_to_finish is not None and self.polls[jid] >= self.polls_to_finish)
         return NS(id=jid, completed_at=dt.datetime.now(dt.timezone.utc) if fin else None,
                   finish_code=self.finish_code if fin else None, notes=["fake note"])
+
+    def _tasks_get(self, req_options=None):
+        if self.tasks_fail:
+            raise RuntimeError("tasks endpoint down")
+        items = [NS(id="task-" + d, target=NS(id=d, type="datasource"), schedule_id=None if d in self.no_sched else "sched-1", priority=50,
+                    consecutive_failed_count=0) for d in list(self.owned_tasks) + ["unrelated-ds"]]
+        if self.tasks_empty:
+            items = []
+        return items, NS(total_available=len(items))
 
     def _jobs_get(self, req_options=None):
         if self.jobs_get_fails:
@@ -197,13 +219,17 @@ def test_flow(cur):
     tab.already_queued.add("T4TEST-17")
     s = run_once(cur, tab, [target("T4TEST-17", [P]), target("T4TEST-18", [P])], today, e=e)
     r8, r9 = rows(cur, "T4TEST-17"), rows(cur, "T4TEST-18")
-    check("already queued on Tableau: no crash, row Failed with message, no job id",
-          len(r8) == 1 and r8[0][2] == "Failed" and r8[0][3] == 1 and r8[0][1] is None and "already queued" in r8[0][4],
+    check("already queued on Tableau (409): no crash, row Cancelled with the 'already queued' message, no job id",
+          len(r8) == 1 and r8[0][2] == "Cancelled" and r8[0][3] == 1 and r8[0][1] is None and r8[0][4] == m.QUEUED_MSG,
           str([x[:5] for x in r8]))
     check("already queued: next target still submitted and Succeeded", tab.submitted == ["T4TEST-18"]
           and [x[2] for x in r9] == ["Succeeded"])
-    check("already queued: counted as failed in summary and exit code 1",
-          "failed=1" in m.summary_line(s, True) and m.exit_code(s) == 1)
+    check("already queued: NOT a failure (failed=0, exit 0, no refresh_failed alert)",
+          "failed=0" in m.summary_line(s, True) and m.exit_code(s) == 0 and not s["alerts"], m.summary_line(s, True))
+    tab = FakeTableau()
+    s = run_once(cur, tab, [target("T4TEST-17", [P])], today, e=e)
+    check("already queued: the next run does not count it as a failed attempt (no alert)",
+          not any(a["code"].startswith("refresh_failed") for a in s["alerts"]), str(s["alerts"]))
     # 6. timeout, still running, then reconciled
     tab = FakeTableau(polls_to_finish=None)
     run_once(cur, tab, [target("T4TEST-5", [P])], today, e=e, timeout_s=0)
@@ -321,13 +347,251 @@ def test_flow(cur):
     check("already queued/running refresh on Tableau: skipped, nothing written",
           tab.submitted == [] and not rows(cur, "T4TEST-12") and "already queued" in s["skip"]["T4TEST-12"])
     tab.bg = [bg_job("T4TEST-12", "other-1", ended=True)]
+    tab.foreign = {"other-1": NS(id="other-1", datasource_id="T4TEST-12", completed_at=dt.datetime.now(dt.timezone.utc), finish_code=1, notes=[])}
     run_once(cur, tab, [target("T4TEST-12", [P])], today, e=e)
-    check("an ended refresh job on Tableau does not block", len(tab.submitted) == 1)
+    check("an ended FAILED refresh job of someone else does not block", len(tab.submitted) == 1)
     tab = FakeTableau()
     tab.jobs_get_fails = True
     s = run_once(cur, tab, [target("T4TEST-16", [P])], today, e=e)
     check("Tableau job list unreadable: skipped (fail closed), counted as lookup failure, exit 1",
           tab.submitted == [] and s["lookup_failed"] == 1 and m.exit_code(s) == 1)
+
+
+def foreign_job(tid, jid, minutes_after_etl=5, finish_code=0, ds_id=None, ended=True):
+    """A refresh job somebody else submitted (old refresh job, Tableau schedule): (background list item, job detail).
+    The test ETL ended 5 minutes ago; minutes_after_etl places the job's creation relative to that."""
+    created = (sgt_now() - dt.timedelta(minutes=5)).replace(tzinfo=m.SGT) + dt.timedelta(minutes=minutes_after_etl)
+    midnight = dt.datetime.combine(sgt_now().date(), dt.time()).replace(tzinfo=m.SGT)
+    created = max(created, midnight + dt.timedelta(seconds=30))   # just after midnight "an hour before the ETL" would be yesterday
+    created = created.astimezone(dt.timezone.utc)
+    bg = NS(id=jid, title="DS-" + tid, type="RefreshExtracts", created_at=created, ended_at=created if ended else None)
+    det = NS(id=jid, datasource_id=ds_id or tid, completed_at=created if ended else None, finish_code=finish_code if ended else None, notes=[])
+    return bg, det
+
+
+def test_adopt(cur):
+    today = m.dwh_today(cur)
+    P = "CQGlobalSGDW: A"
+    e = {P: (sgt_now() - dt.timedelta(minutes=5), True)}
+
+    def case(tid, jobs=(), execute=True, owned=False, unreadable=(), **kw):
+        tab = FakeTableau()
+        for bg, det in jobs:
+            tab.bg.append(bg)
+            tab.foreign[bg.id] = det
+        tab.unreadable.update(unreadable)
+        for u in unreadable:
+            tab.foreign.pop(u, None)
+        if owned:
+            tab.owned_tasks.append(tid)
+        s = run_once(cur, tab, [target(tid, [P])], today, execute=execute, e=e, **kw)
+        return tab, s
+
+    # --- extracts nobody else refreshes: strict adoption (after the last ETL + margin), else we refresh
+    tab, s = case("T4TEST-AD30", [foreign_job("T4TEST-AD30", "old-1")])
+    r = rows(cur, "T4TEST-AD30")
+    check("adopt: someone's finished refresh after the ETL (+margin) -> nothing submitted", tab.submitted == [] and s["refresh"] == [])
+    check("adopt: one Succeeded row with that job's id and a FinishedAt", len(r) == 1 and r[0][2] == "Succeeded" and r[0][1] == "old-1"
+          and r[0][3] == 1 and r[0][4] == m.ADOPT_MSG, str([x[:5] for x in r]))
+    tab2 = FakeTableau()
+    run_once(cur, tab2, [target("T4TEST-AD30", [P])], today, e=e)
+    check("adopt: next run sees it as fresh (no refresh, no second row)", tab2.submitted == [] and len(rows(cur, "T4TEST-AD30")) == 1)
+    check("adopt: summary line counts it", "adopted=1" in m.summary_line(s, True), m.summary_line(s, True))
+    tab, s = case("T4TEST-AD31", [foreign_job("T4TEST-AD31", "old-2")], execute=False)
+    check("adopt dry run: decides adopt, writes nothing", tab.submitted == [] and not rows(cur, "T4TEST-AD31") and len(s["adopted"]) == 1)
+    tab, s = case("T4TEST-AD32", [foreign_job("T4TEST-AD32", "old-3", minutes_after_etl=-3)])
+    check("created BEFORE the ETL ended: not adopted, we refresh", tab.submitted == ["T4TEST-AD32"])
+    tab, s = case("T4TEST-AD40", [foreign_job("T4TEST-AD40", "old-9", minutes_after_etl=1)])
+    check("created within the clock-skew margin after the ETL: not adopted, we refresh", tab.submitted == ["T4TEST-AD40"])
+    tab, s = case("T4TEST-AD33", [foreign_job("T4TEST-AD33", "old-4", finish_code=1)])
+    check("other job failed: not adopted, we refresh", tab.submitted == ["T4TEST-AD33"])
+    tab, s = case("T4TEST-AD34", [foreign_job("T4TEST-AD34", "old-5", ds_id="some-other-datasource")])
+    check("same title but another data source id: not adopted, we refresh", tab.submitted == ["T4TEST-AD34"])
+    tab, s = case("T4TEST-AD35", [foreign_job("T4TEST-AD35", "old-6", ended=False)])
+    check("other job still running: we wait, nothing submitted, nothing written", tab.submitted == [] and not rows(cur, "T4TEST-AD35")
+          and s["waiting"] == 1)
+    tab, s = case("T4TEST-AD36")
+    check("nobody else refreshes it and no other job: refresh as before", tab.submitted == ["T4TEST-AD36"])
+    os.environ["T4_ADOPT"] = "0"
+    try:
+        tab, s = case("T4TEST-AD37", [foreign_job("T4TEST-AD37", "old-7")])
+    finally:
+        del os.environ["T4_ADOPT"]
+    check("T4_ADOPT=0: adoption off for extracts nobody else owns, we refresh", tab.submitted == ["T4TEST-AD37"] and not s["adopted"])
+    bg, det = foreign_job("T4TEST-AD38", "old-8")
+    tab, s = case("T4TEST-AD38", [(bg, det)], unreadable=["old-8"])
+    check("someone's job detail unreadable: cannot prove there was no refresh, so WAIT (no second refresh)",
+          tab.submitted == [] and s["waiting"] == 1 and not rows(cur, "T4TEST-AD38"))
+    tab = FakeTableau()
+    tab.jobs_get_fails = True
+    s = run_once(cur, tab, [target("T4TEST-AD39", [P])], today, e=e)
+    check("job list unreadable: fail closed (skip, lookup_failed), nothing submitted", tab.submitted == [] and s["lookup_failed"] >= 1)
+
+    # --- extracts another refresher owns (old job / Tableau schedule): never submitted, whatever ran today is adopted
+    tab, s = case("T4TEST-AD50", owned=True)
+    check("owned, owner has not refreshed yet: nothing submitted, waiting, nothing written",
+          tab.submitted == [] and s["waiting"] == 1 and not rows(cur, "T4TEST-AD50") and "never refreshes it" in s["skip"]["T4TEST-AD50"],
+          str(s["skip"]))
+    tab, s = case("T4TEST-AD51", [foreign_job("T4TEST-AD51", "own-1", minutes_after_etl=-60)], owned=True)
+    r = rows(cur, "T4TEST-AD51")
+    check("owned, owner refreshed today BEFORE the ETL: adopted as is (no extra refresh), owner row written",
+          tab.submitted == [] and len(r) == 1 and r[0][2] == "Succeeded" and r[0][4].startswith(m.OWNER_PREFIX), str([x[:5] for x in r]))
+    tab2 = FakeTableau()
+    tab2.owned_tasks.append("T4TEST-AD51")
+    tab2.bg = [foreign_job("T4TEST-AD51", "own-1", minutes_after_etl=-60)[0]]
+    tab2.foreign = {"own-1": foreign_job("T4TEST-AD51", "own-1", minutes_after_etl=-60)[1]}
+    s2 = run_once(cur, tab2, [target("T4TEST-AD51", [P])], today, e=e)
+    check("owned, already adopted today: next run neither refreshes nor adopts again", tab2.submitted == [] and len(rows(cur, "T4TEST-AD51")) == 1
+          and not s2["adopted"])
+    tab, s = case("T4TEST-AD52", [foreign_job("T4TEST-AD52", "own-2", finish_code=1)], owned=True)
+    check("owned, owner's refresh FAILED: still never submitted by us (waiting)", tab.submitted == [] and not rows(cur, "T4TEST-AD52"))
+    os.environ["T4_ADOPT"] = "0"
+    try:
+        tab, s = case("T4TEST-AD53", owned=True)
+    finally:
+        del os.environ["T4_ADOPT"]
+    check("owned with T4_ADOPT=0: still never submitted", tab.submitted == [])
+    real = m.other_refreshers
+
+    def with_owner(owner):
+        def fake(cur_, tab_, today_=None, env=os.environ):
+            o, p = real(cur_, tab_, today_, env)
+            o.update(owner)
+            return o, p
+        return fake
+
+    # old job: only ITS refresh counts = created after its own ETL (Etl_Name of the old table) ended
+    m.other_refreshers = with_owner({"t4test-ad54": m.Owner("the old refresh job", {P})})
+    try:
+        tab, s = case("T4TEST-AD54", [foreign_job("T4TEST-AD54", "early-1", minutes_after_etl=-60)])
+        check("old job owned: a refresh from BEFORE its ETL ended (e.g. a manual one) is not the old job's: not adopted, never submitted, waiting",
+              tab.submitted == [] and not rows(cur, "T4TEST-AD54") and "old refresh job" in s["skip"]["T4TEST-AD54"], str(s["skip"]))
+        tab, s = case("T4TEST-AD54", [foreign_job("T4TEST-AD54", "old-ok", minutes_after_etl=1)])
+        r = rows(cur, "T4TEST-AD54")
+        check("old job owned: its refresh created after its ETL ended is adopted (no margin needed)", tab.submitted == [] and len(r) == 1
+              and r[0][1] == "old-ok" and r[0][4].startswith(m.OWNER_PREFIX), str([x[:5] for x in r]))
+    finally:
+        m.other_refreshers = real
+    m.other_refreshers = with_owner({"t4test-ad57": m.Owner("the old refresh job", {"CQGlobalSGDW: SomeOtherETL"})})
+    try:
+        tab, s = case("T4TEST-AD57", [foreign_job("T4TEST-AD57", "old-x", minutes_after_etl=1)])
+        check("old job owned, its ETL has not succeeded today: the old job cannot have run, nothing adopted or submitted",
+              tab.submitted == [] and not rows(cur, "T4TEST-AD57"))
+    finally:
+        m.other_refreshers = real
+    # taken over today: soft ownership
+    m.other_refreshers = with_owner({"t4test-ad58": m.Owner("its refresher before today's takeover", soft=True),
+                                     "t4test-ad59": m.Owner("its refresher before today's takeover", soft=True)})
+    try:
+        tab, s = case("T4TEST-AD58", [foreign_job("T4TEST-AD58", "prev-1", minutes_after_etl=-60)])
+        check("taken over today, the previous refresher already ran today: adopted, no second refresh", tab.submitted == []
+              and len(rows(cur, "T4TEST-AD58")) == 1)
+        tab, s = case("T4TEST-AD58")
+        check("... and the next run does not refresh it either", tab.submitted == [] and len(rows(cur, "T4TEST-AD58")) == 1)
+        tab, s = case("T4TEST-AD59")
+        check("taken over today, the previous refresher did NOT run today: t4 refreshes it (reports are not held a day)", tab.submitted == ["T4TEST-AD59"])
+    finally:
+        m.other_refreshers = real
+    # fallback list when the old table cannot be read (fake cursor), and 'none'
+    import pyodbc
+
+    class Cur:
+        def __init__(self, extract_tasks=5):
+            self.n, self.r = extract_tasks, []
+
+        def execute(self, sql, *a):
+            if "ETL_Tableau_ExtractMapping" in sql:
+                raise pyodbc.ProgrammingError("42000", "The SELECT permission was denied")
+            self.r = [(self.n,)] if "COUNT(*)" in sql else []
+            return self
+
+        def fetchall(self):
+            return self.r
+
+        def fetchone(self):
+            return self.r[0]
+    tab = FakeTableau()
+    o, p = m.other_refreshers(Cur(), tab, today, {"OLD_JOB_DATASOURCE_IDS": "AA-1, bb-2"})
+    check("old table unreadable: OLD_JOB_DATASOURCE_IDS is used (case-insensitive), no problem", not p and o["aa-1"].text == "the old refresh job" and "bb-2" in o, (o, p))
+    o, p = m.other_refreshers(Cur(), tab, today, {})
+    check("old table unreadable and no OLD_JOB_DATASOURCE_IDS: a problem (nothing will be submitted)", len(p) == 1 and "OLD_JOB_DATASOURCE_IDS" in p[0], p)
+    o, p = m.other_refreshers(Cur(), tab, today, {"OLD_JOB_DATASOURCE_IDS": "none"})
+    check("OLD_JOB_DATASOURCE_IDS=none: no old job here, no problem", not p and "aa-1" not in o)
+    tab = FakeTableau()
+    tab.tasks_empty = True
+    o, p = m.other_refreshers(Cur(extract_tasks=5), tab, today, {"OLD_JOB_DATASOURCE_IDS": "none"})
+    check("Tableau returns NO extract task while the last sync saw some: treated as a partial read (problem)", any("partial read" in x for x in p), p)
+    tab = FakeTableau()
+    tab.owned_tasks.append("ds-weekly")
+    tab.sched_days = {(today.weekday() + 1) % 7}
+    o, _ = m.other_refreshers(Cur(), tab, today, {"OLD_JOB_DATASOURCE_IDS": "none"})
+    tab.sched_days = {today.weekday()}
+    o2, _ = m.other_refreshers(Cur(), tab, today, {"OLD_JOB_DATASOURCE_IDS": "none"})
+    check("a Tableau schedule owns its extract only on the days it fires (weekly: not today -> t4 may refresh; today -> owned)",
+          "ds-weekly" not in o and "ds-weekly" in o2)
+    # incremental refresh jobs are seen too
+    tab = FakeTableau()
+    bg, det = foreign_job("T4TEST-AD60", "inc-1")
+    bg.type = "IncrementExtract"
+    tab.bg, tab.foreign = [bg], {"inc-1": det}
+    s = run_once(cur, tab, [target("T4TEST-AD60", [P])], today, e=e)
+    check("an incremental refresh job (type IncrementExtract) counts like a full one: adopted", tab.submitted == [] and len(rows(cur, "T4TEST-AD60")) == 1)
+    # repeated 'already queued' answers
+    for i in range(3):
+        tab = FakeTableau()
+        tab.already_queued.add("T4TEST-AD61")
+        s = run_once(cur, tab, [target("T4TEST-AD61", [P])], today, e=e)
+    codes = [a["code"] for a in s["alerts"]]
+    check("'already queued' twice: alerted; three times: no further submit, refresh_queued_stuck alert", "refresh_queued_stuck" in codes
+          or "refresh_queued_twice" in codes, codes)
+    tab = FakeTableau()
+    s = run_once(cur, tab, [target("T4TEST-AD61", [P])], today, e=e)
+    check("... after 3 'already queued' answers t4 stops submitting for the day (needs a human)", tab.submitted == []
+          and "refresh_queued_stuck" in [a["code"] for a in s["alerts"]], str(s["alerts"]))
+    bg, det = foreign_job("T4TEST-AD61", "late-ok")
+    tab = FakeTableau()
+    tab.bg, tab.foreign = [bg], {"late-ok": det}
+    s = run_once(cur, tab, [target("T4TEST-AD61", [P])], today, e=e)
+    check("... but a refresh someone else finishes later is still adopted (the report is not held all day)",
+          tab.submitted == [] and any(r[2] == "Succeeded" and r[1] == "late-ok" for r in rows(cur, "T4TEST-AD61")))
+    # soft owner (taken over today) while the other refreshers cannot be read: nothing submitted
+    def soft_with_problem(cur_, tab_, today_=None, env=os.environ):
+        return {"t4test-ad62": m.Owner("its refresher before today's takeover", soft=True)}, ["cannot read the Tableau extract refresh tasks (Test)"]
+    m.other_refreshers = soft_with_problem
+    try:
+        tab, s = case("T4TEST-AD62")
+    finally:
+        m.other_refreshers = real
+    check("taken over today but the other refreshers could not be read: nothing submitted (no double refresh)",
+          tab.submitted == [] and "could not be read" in s["skip"].get("T4TEST-AD62", ""), str(s["skip"]))
+    # a data-source task whose schedule cannot be resolved counts as an owner (fail closed)
+    tab = FakeTableau()
+    tab.owned_tasks.append("ds-nosched")
+    tab.no_sched.add("ds-nosched")
+    o, p = m.other_refreshers(Cur(), tab, today, {"OLD_JOB_DATASOURCE_IDS": "none"})
+    check("a Tableau task without a resolvable schedule still owns its extract (fail closed)", "ds-nosched" in o, (sorted(o), p))
+    tab = FakeTableau()
+    tab.tasks_fail = True
+    s = run_once(cur, tab, [target("T4TEST-AD55", [P])], today, e=e)
+    check("other refreshers unreadable: nothing submitted at all, one refresh_owners_unknown alert",
+          tab.submitted == [] and [a["code"] for a in s["alerts"]] == ["refresh_owners_unknown"], str(s["alerts"]))
+
+    # --- the t6 side: an owner-adopted row counts as fresh even though it is older than the last ETL
+    import t6_send as t6
+    g = t6.Gate.__new__(t6.Gate)
+    g.today = today
+    g.wb = {"w": ("Ready", 1)}
+    g.sources = {"w": [{"id": "T4TEST-AD51", "name": "x", "status": "Ready", "kind": "Extract", "target": "T4TEST-AD51"}]}
+    g.target_ds = {}
+    g.pipes = {"T4TEST-AD51": {P: True}}
+    g.etl = {P: (e[P][0], True)}
+    g.refreshed = {"T4TEST-AD51": e[P][0] - dt.timedelta(minutes=60)}
+    g.owner_refreshed = set()
+    ok1 = g.check("w")[0]
+    g.owner_refreshed = {"T4TEST-AD51"}
+    ok2 = g.check("w")[0]
+    check("t6: a refresh older than the ETL holds the report, unless it was adopted from the extract's own refresher",
+          ok1 is False and ok2 is True)
 
 
 def test_run_order(cur):
@@ -515,6 +779,8 @@ def test_exclusion_reasons():
 
 
 def main():
+    import testguard  # noqa: E402  dev warehouse only, whatever .env says
+    testguard.require_dev()
     os.environ['EVENTLOG_DISABLED'] = '1'
     os.environ.setdefault('LOG_DIR', tempfile.mkdtemp(prefix='logs_'))   # tests never write the real out/*.log
     os.environ['LASTRUN_DIR'] = tempfile.mkdtemp(prefix='lastrun_')   # tests must not write real last-run markers
@@ -528,6 +794,7 @@ def main():
         test_real_reads(cur)
         test_flow(cur)
         test_run_order(cur)
+        test_adopt(cur)
         test_tableau_busy(cur)
         test_exclusion_reasons()
     finally:

@@ -2,7 +2,7 @@
 
 Target: warehouse `<UAT_DWH_SERVER>` / `CQGlobalSGDW`, Tableau `http://tableau-uat.example.com:8000/`. Database objects, grants and the manual data load are done by the DBA and not covered here. Dev is switched off: do not run anything from the dev machine with the same Tableau token.
 
-Everything below is run in **PowerShell as administrator** on the Tableau host. Install folder: `F:\datateam_implementation\TableauSubscriptionAutomation`.
+Everything below is run in **PowerShell as administrator** on the Tableau host. Install folder: `<INSTALL_DIR>\TableauSubscriptionAutomation`.
 
 ## 1. Get the code
 
@@ -11,11 +11,11 @@ Repository (public, values such as server names and emails are blanked in it, th
 
 ```powershell
 git --version
-cd F:\datateam_implementation
+cd <INSTALL_DIR>
 git clone https://github.com/Zianhua/Tableau-Automation.git TableauSubscriptionAutomation
 ```
 
-If `git` is not installed on the host, download the repository as a zip from the GitHub page and extract it to `F:\datateam_implementation\TableauSubscriptionAutomation` instead.
+If `git` is not installed on the host, download the repository as a zip from the GitHub page and extract it to `<INSTALL_DIR>\TableauSubscriptionAutomation` instead.
 
 Then copy two files from the prepared package (`UAT_package\TableauSubscriptionAutomation` on the dev machine) into the same folder on the host:
 - `.env` (the UAT settings, holds secrets: copy the file over a secured path, never by mail or chat)
@@ -24,11 +24,11 @@ Then copy two files from the prepared package (`UAT_package\TableauSubscriptionA
 ## 2. Install (once)
 
 ```powershell
-cd F:\datateam_implementation\TableauSubscriptionAutomation
+cd <INSTALL_DIR>\TableauSubscriptionAutomation
 .\scripts\schedule\deploy_uat.ps1
 ```
 
-The scheduled tasks run as the account you are logged in as, unless you add `-ServiceAccount 'DOMAIN\name'`. Use the account that is in the UAT database role `DRPNTableauSVRC` (today `example\PNTableauSVRC` and `<UAT_DOMAIN>\PNTableauSVRC`): a personal login has SELECT only and every write would fail. Run the manual commands in section 3 as that account too (for example in a PowerShell opened with runas). It checks the host, builds the Python environment, sets folder rights, registers the Event Log source, runs one read-only check, and registers the scheduled tasks in DRY-RUN mode (it asks for the account password once). Nothing is written, paused, refreshed or mailed yet. Re-running is safe.
+The scheduled tasks run as the account you are logged in as, unless you add `-ServiceAccount 'DOMAIN\name'`. Use the account that is in the UAT database role `<SERVICE_DB_ROLE>` (today `example\PNTableauSVRC` and `<UAT_DOMAIN>\PNTableauSVRC`): a personal login has SELECT only and every write would fail. Run the manual commands in section 3 as that account too (for example in a PowerShell opened with runas). It checks the host, builds the Python environment, sets folder rights, registers the Event Log source, runs one read-only check, and registers the scheduled tasks in DRY-RUN mode (it asks for the account password once). Nothing is written, paused, refreshed or mailed yet. Re-running is safe.
 
 Success looks like: `imports ok`, the mapping sync dry run ending with `RUN SUMMARY mode=dry-run exit=0`, and a list of seven tasks with a NextRunTime.
 
@@ -65,15 +65,15 @@ Open `out\review_list.csv`. Delete in Tableau any subscription that must not go 
 ## 4. Day to day
 
 - Logs are in `out\*_<date>.log`. Each ends with a `RUN SUMMARY` line; `needs_human=0` means nothing to do. The daily summary mail arrives at 17:30.
-- Stop everything: `New-Item F:\datateam_implementation\TableauSubscriptionAutomation\out\KILL -ItemType File` (delete the file to resume).
+- Stop everything: `New-Item <INSTALL_DIR>\TableauSubscriptionAutomation\out\KILL -ItemType File` (delete the file to resume).
 - Give a subscription back to Tableau: `& $py scripts\t11_pause.py --restore <id> --execute`
 - Remove the tasks: `.\scripts\schedule\register_tasks.ps1 -Unregister`
 
-## 5. UAT warehouse prerequisites (checked read-only on 2026-11-09, not yet met)
+## 5. UAT warehouse prerequisites (first checked 2026-11-09; item 1 met on 2026-11-12)
 
-The install in section 2 is safe without these (it only runs dry). Steps A to C are not meaningful until they are done. The workbooks used for testing must not depend on DailyETL (use ones fed by LeadGenETL or NovaDailyETL, which do log on UAT) and their data sources must read <UAT_DWH_SERVER>.
+The install in section 2 is safe without these (it only runs dry). Steps A to C are not meaningful until items 2 and 3 are settled. The workbooks used for testing must not depend on DailyETL (use ones fed by LeadGenETL or NovaDailyETL, which do log on UAT) and their data sources must read <UAT_DWH_SERVER>.
 
-1. **Registry seed rows are missing.** `Tableau_PipelineTable`, `Tableau_StaticTable` and `Tableau_LineageSource` all have 0 rows. The DBA runs `ITSC_384043_manual_data_load.sql` (7 pipeline rows, 2 static rows). It does not seed `Tableau_LineageSource`, which the registry sync needs (3 rows: `Lineage` to `CQGlobalSGDW: DailyETL`, `DW_NovaLineage` to `CQGlobalSGDW: NovaDailyETL`, `OAO_Lineage` to `CQGlobalSGDW: LeadGenETL`).
+1. **Registry seed rows: present.** Checked read-only on 2026-11-12 with `scripts/sql/prod_precheck.sql`: registry 20 Auto + 7 Manual rows, 2 static tables, 3 lineage sources, and every object, column and grant the scripts need. Re-run that script on any warehouse before deploying to it.
 2. **DailyETL never appears in the UAT ETL log.** `Integration.ETL_Master_Log` only holds LeadGenETL (daily 09:30) and NovaDailyETL (Tue to Sat 10:00). 27 of the 29 mapped extracts belong to DailyETL, and the 33 `Integration.Lineage` tables of DailyETL were last loaded on or before 2026-06-29. Result: those tables are reported UNCONFIRMED by the registry sync (no log evidence, not registered) and their workbooks stay not ready. Either the UAT DailyETL is run and logged, or the DBA adds Manual registry rows for them, plus a test log row (D-052 pattern) if a send is to be tested. Say which before Step A.
 3. **Where the Tableau data sources really read.** The 2026-10-22 inventory showed every SQL Server connection on this Tableau pointing at `<PROD_DWH_SERVER>` (production), and the test workbooks were later moved to the dev warehouse. The scripts gate on the UAT warehouse log only; they do not look at the connection. Confirm in Tableau (Edit connection on each in-scope data source) that they read `<UAT_DWH_SERVER>`, otherwise a refresh or send is decided on one warehouse and fed by another.
 

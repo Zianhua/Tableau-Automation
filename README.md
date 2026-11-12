@@ -13,14 +13,16 @@ Script-driven refresh and delivery of Tableau reports that use several extracts,
 - [docs/UAT_TEST_PLAN.md](docs/UAT_TEST_PLAN.md) and [docs/UAT_TEST_RESULTS_20261027.md](docs/UAT_TEST_RESULTS_20261027.md): UAT test cases and results
 - [docs/FEASIBILITY_CROSSTAB_EXPORT.md](docs/FEASIBILITY_CROSSTAB_EXPORT.md): crosstab/Excel export study (parked)
 - [docs/edge_cases.md](docs/edge_cases.md): known edge cases, not in scope
-- [docs/RUNBOOK.md](docs/RUNBOOK.md): how to operate it (schedules, alerts, kill switch, restore)
+- [docs/RUNBOOK.md](docs/RUNBOOK.md): how to operate it (schedules, alerts, kill switch, restore, who refreshes each extract)
 - [docs/LIMITATIONS.md](docs/LIMITATIONS.md): known limits and assumptions
 - [docs/DB_CHANGES.md](docs/DB_CHANGES.md): every database change, in the order to apply it, with permissions and the dev-only test changes (for the DBA)
 - [docs/DEPLOYMENT_PLAN.md](docs/DEPLOYMENT_PLAN.md): step-by-step deployment to the server, staged rollout, monitoring, what is not tested yet
 - [docs/DEPLOYMENT_UAT.md](docs/DEPLOYMENT_UAT.md): the UAT-only walk-through on the host (<UAT_DWH_SERVER>, tableau-uat)
-- [docs/PROD_PREFLIGHT.md](docs/PROD_PREFLIGHT.md): read-only production checks before go-live
+- [docs/DEPLOYMENT_PROD.md](docs/DEPLOYMENT_PROD.md): production install, go-live and rollback
+- [scripts/sql/prod_precheck.sql](scripts/sql/prod_precheck.sql): read-only check of every object, column, grant and seed row on a warehouse
+- [docs/PROD_PREFLIGHT.md](docs/PROD_PREFLIGHT.md), [docs/DB_CHANGES.md](docs/DB_CHANGES.md), [docs/DEPLOYMENT_PLAN.md](docs/DEPLOYMENT_PLAN.md): history of the design and the dev rollout (superseded for deployment by the files above)
 
-Suggested reading order for deployment: PROD_PREFLIGHT, DB_CHANGES, DEPLOYMENT_PLAN, then RUNBOOK.
+**Deploying:** `scripts/sql/prod_precheck.sql` on the target warehouse, then [DEPLOYMENT_PROD.md](docs/DEPLOYMENT_PROD.md) (or [DEPLOYMENT_UAT.md](docs/DEPLOYMENT_UAT.md)), then [RUNBOOK.md](docs/RUNBOOK.md). The deployable set is the scripts without the `*_checks.py` test suites (which only ever run against the dev warehouse).
 
 ## Local configuration
 
@@ -28,7 +30,7 @@ Environment-specific values are not hard-coded. The Python and PowerShell script
 
 | Key | Used for |
 |---|---|
-| `DEV_DWH_SERVER`, `DEV_DWH_DATABASE` | dev DWH guard of the mapping sync and refresh scripts, and the concurrency test; they refuse any other server or database |
+| `DEV_DWH_SERVER`, `DEV_DWH_DATABASE` | warehouse guard of every script (historical name): set them to the warehouse of the host (production on production); the scripts refuse any other server or database |
 | `SEND_TO_ALL_HOST` | `SEND_TO_ALL_SUBSCRIBERS` only takes effect when the host of `TABLEAU_SERVER_URL` equals this exactly |
 | `OWNER_EMAIL` | default alert recipient when `ALERT_TO` is unset |
 | `DEFAULT_SENDER_EMAIL` | display From address when `SEND_FROM` is unset |

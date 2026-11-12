@@ -742,6 +742,8 @@ def _t4_counts_takeover(cur, today):
 
 
 def main():
+    import testguard  # noqa: E402  dev warehouse only, whatever .env says
+    testguard.require_dev()
     os.environ['EVENTLOG_DISABLED'] = '1'
     os.environ.setdefault('LOG_DIR', tempfile.mkdtemp(prefix='logs_'))   # tests never write the real out/*.log
     os.environ['LASTRUN_DIR'] = tempfile.mkdtemp(prefix='lastrun_')   # tests must not write real last-run markers

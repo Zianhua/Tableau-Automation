@@ -1,6 +1,13 @@
 """T4 + T5: gated extract refresh. Refresh a published extract only when ALL required pipelines of ALL its tables
 succeeded today, wait for the Tableau job, log the outcome when it finishes.
 
+ONE REFRESHER PER EXTRACT (no double refresh, RUNBOOK section 22): an extract that the old refresh job (its table
+Integration.ETL_Tableau_ExtractMapping, read-only) or an Active Tableau extract schedule firing today refreshes is NEVER submitted
+here; its refresh of today is recorded ("adopted-owner" row) and t6 treats it as fresh. If the list of other refreshers cannot be
+read, nothing is submitted in that run. Extracts taken over by extract_takeover.py are refreshed here only (on the takeover day itself
+only if their previous refresher did not refresh them that day). For other extracts another job's finished refresh created after the last ETL (+3 min margin) is adopted instead of
+refreshing again (T4_ADOPT=0 switches that off).
+
 Scope (D-035, --scope / env T4_REFRESH_SCOPE): during the pilot the default 'takeover' refreshes ONLY extracts behind workbooks that
 have a subscription taken over by t11_pause.py (Tableau_SubscriptionBackup TakenOver = 1, not restored); an empty takeover set
 means nothing is refreshed. 'all' (set after the pilot) includes every workbook with an active subscription.
@@ -102,14 +109,14 @@ log = logging.getLogger("t4_refresh")
 def connect():
     server, db = os.environ["CONN_SERVER"], os.environ["CONN_DATABASE"]
     if not DEV_SERVER or not DEV_DB or server.lower() != DEV_SERVER or db.lower() != DEV_DB:
-        sys.exit("Refusing to run: only the dev DWH (D-026) is allowed, got %s / %s" % (server, db))
+        sys.exit("Refusing to run: CONN_SERVER / CONN_DATABASE (%s / %s) do not match the warehouse guard DEV_DWH_SERVER / DEV_DWH_DATABASE in .env" % (server, db))
     drv = os.environ["CONN_DRIVER"].strip("{}")
     conn = pyodbc.connect("Driver={%s};Server=%s;Database=%s;Trusted_Connection=yes;TrustServerCertificate=yes"
                           % (drv, server, db), autocommit=True)
     sname, dname = conn.cursor().execute("SELECT @@SERVERNAME, DB_NAME()").fetchone()
     if not sname.lower().startswith(DEV_SERVER.split(".")[0]) or dname.lower() != DEV_DB:
         conn.close()
-        sys.exit("Refusing to run: connected to %s / %s, not the dev DWH" % (sname, dname))
+        sys.exit("Refusing to run: connected to %s / %s, which is not the warehouse named in DEV_DWH_SERVER / DEV_DWH_DATABASE (@@SERVERNAME must start with its first part)" % (sname, dname))
     return conn
 
 
@@ -307,6 +314,11 @@ def pipeline_text(p, known, etl):
     return "%s: %s at %s" % (p, "OK" if ok else "latest run FAILED", end.strftime("%H:%M"))
 
 
+def queued_row(j):
+    """A row written when Tableau answered 'already queued' (409): not our attempt, so it is neither a failure nor counted."""
+    return str(j.get("msg") or "").startswith(QUEUED_MSG)
+
+
 def decide(t, etl, jobs):
     """Returns (action, reason). action is 'refresh' or 'skip'. jobs: this target's RefreshJob rows for today (plus any
     still-running ones), after reconcile, as dicts with Status, 'submitted' (aware datetime) and 'running' (Tableau job
@@ -330,7 +342,7 @@ def decide(t, etl, jobs):
     succeeded = [j for j in jobs if j["Status"] == "Succeeded"]
     if any(j["submitted"] > last_etl for j in succeeded):
         return "skip", "already refreshed today after the last required ETL"
-    unsuccessful = [j for j in jobs if j["Status"] != "Succeeded"]
+    unsuccessful = [j for j in jobs if j["Status"] != "Succeeded" and not queued_row(j)]
     if len(unsuccessful) >= MAX_ATTEMPTS:
         return "skip", "gave up after %d failed attempts today, needs a human" % len(unsuccessful)
     if succeeded:
@@ -363,14 +375,14 @@ def job_outcome(job):
 
 JOBS_SQL = """
 SELECT RefreshJob_id, DataSource_id, TableauJobId, Status, CAST(SubmittedDate AS varchar(10)),
-       CAST(SWITCHOFFSET(SubmittedAt, '+00:00') AS datetime2(0))
+       CAST(SWITCHOFFSET(SubmittedAt, '+00:00') AS datetime2(0)), Message
 FROM Integration.Tableau_RefreshJob
 WHERE (Status = 'Submitted' OR SubmittedDate = ?) AND DataSource_id LIKE ?"""
 
 
 def load_jobs(cur, today, ds_like="%"):
     return [{"id": r[0], "ds": r[1], "job": r[2], "Status": r[3], "date": r[4],
-             "submitted": r[5].replace(tzinfo=dt.timezone.utc), "running": False}
+             "submitted": r[5].replace(tzinfo=dt.timezone.utc), "running": False, "msg": r[6]}
             for r in cur.execute(JOBS_SQL, today.isoformat(), ds_like).fetchall()]
 
 
@@ -411,7 +423,7 @@ def recent_refresh_jobs(tableau, since, clock=time.monotonic):
 def refresh_jobs_for(tableau, ds_name, since):
     """Extract-refresh jobs of the data source with this name, newest first (matched on title, conservative)."""
     js = [j for j in recent_refresh_jobs(tableau, since)
-          if j.title == ds_name and "refresh" in (j.type or "").lower()]
+          if j.title == ds_name and any(k in (j.type or "").lower() for k in ("refresh", "increment"))]
     return sorted(js, key=lambda j: j.created_at or dt.datetime.min.replace(tzinfo=dt.timezone.utc), reverse=True)
 
 
@@ -425,6 +437,132 @@ def active_refresh_job(tableau, ds_name):
     return None
 
 
+ADOPT_MAX_CANDIDATES = 5   # job details read per data source when looking for another initiator's refresh
+ADOPT_MARGIN_MIN = 3       # clock-skew margin: another job's refresh counts only if created this long after the last required ETL
+ADOPT_MSG = "adopted: refreshed by another job after the last required ETL; nothing submitted by this script"
+OWNER_MSG = "adopted-owner: refreshed today by its own refresher (%s); accepted as is, this script never refreshes this extract"
+OWNER_PREFIX = "adopted-owner:"   # t6_send.py treats such a row as fresh whatever the ETL times (owner's decision: no extra refresh)
+QUEUED_MSG = "already queued on Tableau by someone else; nothing submitted by this script (not counted as a failed attempt)"
+OLD_TABLE = "Integration.ETL_Tableau_ExtractMapping"   # the old refresh job's list; only READ here (SELECT), never written
+
+
+def other_refreshers(cur, tableau, today=None, env=os.environ):
+    """Extracts that something else already refreshes, so this script must never submit a refresh for them (no double refresh).
+    Returns ({data source id (lower case): Owner}, [problems]). Any problem means the list may be incomplete: the caller then
+    submits nothing at all (fail closed). Owners:
+    - the old refresh job: data sources with Active_Flag = 1 in its table (read-only SELECT). It refreshes a row once that row's
+      Etl_Name has succeeded today, so its refresh counts only if created after that ETL ended (Owner.etls). Only if this account may
+      not read the table: the ids in env OLD_JOB_DATASOURCE_IDS (comma separated; 'none' = this server has no old job).
+    - Tableau's own extract refresh tasks on an Active schedule, on the days that schedule fires (on other days t4 may refresh).
+    - an extract taken over TODAY (or whose takeover is not confirmed yet): its previous refresher may already have run today, so it
+      stays owned until tomorrow (no second refresh on the takeover day)."""
+    today = today or ops.sg_now().date()
+    owners, problems = {}, []
+    ids_env = str(env.get("OLD_JOB_DATASOURCE_IDS", "") or "").strip()
+    try:
+        rows = cur.execute("SELECT DataSource_id, Etl_Name FROM %s WHERE Active_Flag = 1" % OLD_TABLE).fetchall()
+        for ds, etl_name in rows:
+            o = owners.setdefault(str(ds).strip().lower(), Owner("the old refresh job"))
+            o.etls.add(str(etl_name or "").strip())
+    except pyodbc.Error as e:
+        if not ids_env:
+            problems.append("cannot read %s (%s) and OLD_JOB_DATASOURCE_IDS is not set" % (OLD_TABLE, type(e).__name__))
+        else:
+            log.info("%s not readable here (%s): using OLD_JOB_DATASOURCE_IDS", OLD_TABLE, type(e).__name__)
+            if ids_env.lower() != "none":
+                for x in ids_env.split(","):
+                    if x.strip():
+                        owners[x.strip().lower()] = Owner("the old refresh job")   # no ETL names known: any refresh today counts
+    try:
+        import extract_tasks   # imported late: it needs tableauserverclient only when Tableau is read
+        tasks, schedules, probs = extract_tasks.read_tasks(tableau())
+        for pr in probs:
+            problems.append("Tableau extract task list: %s %s %s" % pr)
+        known = cur.execute("SELECT COUNT(*) FROM Integration.Tableau_ExtractTask t WHERE t.Active_Flag = 1 AND NOT EXISTS ("
+                            "SELECT 1 FROM Integration.Tableau_ExtractTaskBackup b WHERE b.Task_id = t.Task_id AND b.TakenOver = 1 "
+                            "AND b.RestoredAt IS NULL)").fetchone()[0]
+        if not tasks and known:
+            problems.append("Tableau returned no extract refresh task at all, but the last sync saw %d (partial read?)" % known)
+        for x in tasks:
+            sc = schedules.get(x["sched"])
+            if (x["ttype"] or "").lower() != "datasource":
+                continue
+            if sc is not None and (sc.state or "").lower() != "active":
+                continue   # a Suspended schedule refreshes nothing
+            try:
+                fires = True if sc is None else sd.fires_on(sc, today)
+            except sd.Unsupported:
+                fires = True   # a schedule we cannot read or understand counts as running today: never refresh what it may refresh
+            if fires:
+                owners.setdefault(str(x["target"]).lower(), Owner("a Tableau extract refresh schedule"))
+    except PatBusy:
+        raise
+    except Exception as e:
+        problems.append("cannot read the Tableau extract refresh tasks (%s)" % type(e).__name__)
+    try:
+        for (ds,) in cur.execute(
+                "SELECT DISTINCT Target_id FROM Integration.Tableau_ExtractTaskBackup WHERE TakenOver = 1 AND RestoredAt IS NULL "
+                "AND (NeutralisedAt IS NULL OR CAST(SWITCHOFFSET(NeutralisedAt, '+08:00') AS date) >= ?)", today.isoformat()).fetchall():
+            owners.setdefault(str(ds).lower(), Owner("its refresher before today's takeover", soft=True))
+    except pyodbc.Error as e:
+        problems.append("cannot read Tableau_ExtractTaskBackup (%s)" % type(e).__name__)
+    return owners, problems
+
+
+@dataclass
+class Owner:
+    text: str
+    etls: set = field(default_factory=set)   # old job only: its Etl_Names for this data source (it fires after one of them succeeded)
+    soft: bool = False   # taken over today: adopt a refresh the previous refresher already ran today; if there is none, t4 refreshes
+
+
+def owner_after(owner, etl, today):
+    """Earliest creation time (aware) from which a refresh counts as the owner's own, or None when the owner cannot have run yet.
+    Old job: after the first of its Etl_Names that succeeded today ended (its own trigger rule). Others: since midnight."""
+    midnight = dt.datetime.combine(today, dt.time()).replace(tzinfo=SGT)
+    if not owner.etls:
+        return midnight
+    ends = [etl[n][0] for n in owner.etls if n in etl and etl[n][1]]
+    return min(ends).replace(tzinfo=SGT) if ends else None
+
+
+def adoptable_job(tableau, ds_id, ds_name, after, own_ids=()):
+    """Another initiator's extract refresh that already makes this data source fresh: returns (found, unreadable).
+    found = (job detail, created_at) or None. Counts only a job that was CREATED after `after` (aware datetime), has ENDED, and
+    finished with code 0. The title is only a pre-filter; the candidate is confirmed by id (jobs.get_by_id carries the data source
+    id), so two data sources with the same name are never mixed up. Jobs we recorded ourselves (own_ids) are not adopted.
+    unreadable = number of candidate jobs whose detail could not be read: the caller then WAITS (it cannot prove there was no
+    refresh, and a second refresh is not allowed). Raises only when the job LIST cannot be read (the caller then skips)."""
+    n = unreadable = 0
+    for j in refresh_jobs_for(tableau, ds_name, after):
+        if j.id in own_ids or j.ended_at is None or j.created_at is None or j.created_at <= after:
+            continue
+        n += 1
+        if n > ADOPT_MAX_CANDIDATES:
+            break
+        try:
+            full = tableau().jobs.get_by_id(j.id)
+        except PatBusy:
+            raise
+        except Exception as e:
+            log.warning("Cannot read Tableau job %s to check for adoption (%s)", j.id, type(e).__name__)
+            unreadable += 1
+            continue
+        if str(full.datasource_id or "").lower() == str(ds_id).lower() and full.completed_at is not None and full.finish_code in SUCCESS_CODES:
+            return (full, j.created_at), unreadable
+    return None, unreadable
+
+
+def adopt_row(cur, ds_id, job, created_at, message=ADOPT_MSG):
+    """Record the other job's refresh as a Succeeded row of ours, so t6 and the next t4 runs see the extract as refreshed.
+    Same table and columns t4 always writes; nothing is written to the old refresh job's table."""
+    cur.execute("INSERT Integration.Tableau_RefreshJob (DataSource_id, TableauJobId, SubmittedAt, FinishedAt, Status, Message) "
+                "VALUES (?, ?, CAST(? AS datetimeoffset(0)), CAST(? AS datetimeoffset(0)), 'Succeeded', ?)",
+                ds_id, job.id, utc_text(created_at), utc_text(job.completed_at), message[:1000])
+
+
+BUSY_STALE_RUNNING_HOURS = 3   # a job InProgress longer than this is treated as hung by the busy check (env TABLEAU_BUSY_STALE_RUNNING_HOURS)
+WAIT_ALERT_AFTER = "13:00"     # Singapore time after which a still-waiting extract is alerted, once a day (env T4_WAIT_ALERT_AFTER)
 BUSY_STALE_HOURS = 6   # D-057: a Pending job older than this is ignored by the "Tableau busy" check (env TABLEAU_BUSY_STALE_HOURS)
 
 
@@ -436,6 +574,7 @@ def tableau_busy(tableau, own_ids=(), env=os.environ, now=None):
     if str(env.get("TABLEAU_BUSY_CHECK", "1")).strip().lower() in ("0", "off", "false", "no"):
         return None
     stale_h = float(env.get("TABLEAU_BUSY_STALE_HOURS") or BUSY_STALE_HOURS)
+    run_stale_h = float(env.get("TABLEAU_BUSY_STALE_RUNNING_HOURS") or BUSY_STALE_RUNNING_HOURS)
     now = now or dt.datetime.now(dt.timezone.utc)
     since = now - dt.timedelta(hours=max(24.0, stale_h))
     own = {str(i) for i in own_ids if i}
@@ -445,13 +584,18 @@ def tableau_busy(tableau, own_ids=(), env=os.environ, now=None):
         if st not in ("pending", "inprogress") or str(j.id) in own:
             continue
         if st == "inprogress":
-            running += 1
+            started = getattr(j, "started_at", None) or j.created_at
+            if started is not None and now - started > dt.timedelta(hours=run_stale_h):
+                ignored += 1   # a job "running" this long is hung; it must not hold every refresh and send back
+            else:
+                running += 1
         elif j.created_at is not None and now - j.created_at > dt.timedelta(hours=stale_h):
             ignored += 1
         else:
             queued += 1
     if ignored:
-        log.warning("Tableau busy check: ignored %d Pending job(s) older than %g h (stale; cancel them on Tableau Server)", ignored, stale_h)
+        log.warning("Tableau busy check: ignored %d stale job(s) (Pending over %g h or running over %g h; check them on Tableau Server)",
+                    ignored, stale_h, run_stale_h)
     return queued, running, ignored
 
 
@@ -565,10 +709,9 @@ def submit_and_wait(cur, tableau, ready, timeout_s, poll_s, max_concurrent=MAX_C
                 results[t.id] = "Failed"
                 continue
             if job is None:  # tableauserverclient returns None (no exception) when Tableau answers 409 "already queued"
-                log.error("Tableau reports a refresh of %s is already queued; nothing was submitted by us", t.name)
-                finish_row(cur, row_id, "Failed", "Tableau reports a refresh of this data source is already queued; "
-                           "nothing was submitted by us (cancel the stale Pending jobs on Tableau Server)")
-                results[t.id] = "Failed"
+                log.warning("Tableau reports a refresh of %s is already queued by someone else; nothing submitted", t.name)
+                finish_row(cur, row_id, "Cancelled", QUEUED_MSG)
+                results[t.id] = "AlreadyQueued"
                 continue
             cur.execute("UPDATE Integration.Tableau_RefreshJob SET TableauJobId = ?, Message = 'submitted' "
                         "WHERE RefreshJob_id = ?", job.id, row_id)
@@ -605,10 +748,13 @@ def submit_and_wait(cur, tableau, ready, timeout_s, poll_s, max_concurrent=MAX_C
 
 def run(cur, tableau, *, execute, today, timeout_s=TIMEOUT_MIN * 60, poll_s=POLL_SECONDS, targets=None,
         excluded=None, etl_lookup=etl_status_today, ds_like="%", scope="all", due_wbs=None,
-        max_concurrent=MAX_CONCURRENT_REFRESHES, stagger_s=REFRESH_STAGGER_SEC, sched_due=None, sched_notes=None):
+        max_concurrent=MAX_CONCURRENT_REFRESHES, stagger_s=REFRESH_STAGGER_SEC, sched_due=None, sched_notes=None,
+        sched_adopt=None):
     """One scheduler run. tableau is a callable returning a signed-in server (signs in lazily). Returns a summary.
     ds_like restricts which RefreshJob rows are read/reconciled (tests only, so they never touch real rows)."""
     clear_jobs_cache()
+    if sched_adopt is None:   # T4_ADOPT=0 switches the adoption of another job's refresh off
+        sched_adopt = str(os.environ.get("T4_ADOPT", "1")).strip().lower() not in ("0", "off", "false", "no")
     if targets is None:
         targets, excluded = load_targets(cur, scope, due_wbs, sched_due, sched_notes)
     excluded = excluded or {}
@@ -630,22 +776,115 @@ def run(cur, tableau, *, execute, today, timeout_s=TIMEOUT_MIN * 60, poll_s=POLL
     log.info("ETL_Master_Log latest rows today: %s", {p: ("OK" if ok else "FAILED") + " " + e.strftime("%H:%M")
                                                        for p, (e, ok) in sorted(etl.items())} or "none")
     summary = {"refresh": [], "skip": {}, "results": {}, "excluded": excluded, "waiting": 0, "lookup_failed": 0, "alerts": [],
-               "taken_over": len({r[0] for r in taken}), "taken_over_excluded": len(off)}
+               "taken_over": len({r[0] for r in taken}), "taken_over_excluded": len(off), "adopted": []}
     ready = []
     busy = {}   # D-057: the "Tableau busy" check runs once, when the first target is otherwise ready to refresh
+    owners = {}   # other refreshers (old job, Tableau schedules), read once, when the first target passes the ETL gate
+    own_ids = [j["job"] for j in jobs if j["job"]]
+    late = ops.sg_now().strftime("%H:%M") >= str(os.environ.get("T4_WAIT_ALERT_AFTER", WAIT_ALERT_AFTER))
+
+    def lookup_failed(e):
+        summary["lookup_failed"] += 1
+        return "skip", "Tableau job lookup failed (%s): skipped" % type(e).__name__
+
     for t in sorted(targets, key=lambda x: ((x.name or "").lower(), str(x.id))):   # run order: by name
         mine = [j for j in jobs if j["ds"] == t.id and (j["date"] == today.isoformat() or j["running"])]
         action, reason = decide(t, etl, mine)
-        n_bad = sum(j["Status"] in ("Failed", "Cancelled") for j in mine)
+        n_bad = sum(j["Status"] in ("Failed", "Cancelled") and not queued_row(j) for j in mine)
         if reason.startswith("gave up"):
             summary["alerts"].append({"sub": t.id, "wb": t.name, "code": "refresh_gave_up", "text":
                                       "the refresh of extract '%s' failed %d times today; no more attempts today, reports that need it are NOT sent" % (t.name, n_bad)})
         elif n_bad:
             summary["alerts"].append({"sub": t.id, "wb": t.name, "code": "refresh_failed", "text":
                                       "the refresh of extract '%s' failed or was cancelled (%d failed attempt(s) today, retried on the next run, up to %d)" % (t.name, n_bad, MAX_ATTEMPTS)})
+        owner = own_obj = None
+        queued_stuck = 0
+        if action == "refresh":
+            if "o" not in owners:
+                try:
+                    owners["o"] = other_refreshers(cur, tableau, today)
+                except PatBusy:
+                    raise
+                except Exception as e:
+                    owners["o"] = ({}, ["cannot read the other refreshers (%s)" % type(e).__name__])
+                for pr in owners["o"][1]:
+                    log.error("OTHER REFRESHERS UNKNOWN: %s. No refresh is submitted in this run (no double refresh); adoption only", pr)
+                if owners["o"][1]:
+                    summary["alerts"].append({"sub": "owners", "wb": "-", "code": "refresh_owners_unknown", "text":
+                                              "the list of extracts refreshed by the old job / Tableau schedules could not be read (%s); "
+                                              "no extract refresh is submitted until it can" % "; ".join(owners["o"][1])})
+            own_obj = owners["o"][0].get(str(t.id).lower())
+            owner = own_obj.text if own_obj else None
+            if owner is None and owners["o"][1]:
+                owner = "unknown"
+            n_q = sum(queued_row(j) for j in mine)
+            if n_q >= MAX_ATTEMPTS:
+                queued_stuck = n_q   # no further submit today; a refresh someone else finishes is still adopted below
+                summary["alerts"].append({"sub": t.id, "wb": t.name, "code": "refresh_queued_stuck", "text":
+                                          "extract '%s': Tableau answered 'already queued' %d times today but no refresh of it finished; look for a "
+                                          "stuck Pending job on Tableau Server. Reports that need it are held" % (t.name, n_q)})
+            elif n_q >= 2:
+                summary["alerts"].append({"sub": t.id, "wb": t.name, "code": "refresh_queued_twice", "text":
+                                          "extract '%s': Tableau answered 'already queued' %d times today; retried, up to %d" % (t.name, n_q, MAX_ATTEMPTS)})
+            if owner and owner != "unknown" and any(j["Status"] == "Succeeded" for j in mine):
+                action, reason = "skip", "already adopted today from %s (no second refresh)" % owner
+        if action == "refresh":
+            ds, why, failed = check_target(tableau, t)
+            if ds is None:
+                action, reason = "skip", why
+                summary["lookup_failed"] += failed
+        if action == "refresh":
+            try:
+                other = active_refresh_job(tableau, ds.name)
+            except PatBusy:
+                raise
+            except Exception as e:
+                action, reason = lookup_failed(e)
+            else:
+                if other is not None:
+                    action = "skip"
+                    reason = "waiting: a refresh job is already queued/running on Tableau (job %s, not ours)" % other.id
+        if action == "refresh" and (sched_adopt or owner):
+            # Owned by another refresher: whatever it ran today counts (owner's decision: no extra refresh, ETL times not compared).
+            # Otherwise only a refresh created after the last required ETL plus a clock-skew margin counts.
+            if owner and owner != "unknown":
+                after = owner_after(own_obj, etl, today)
+            else:
+                after = max(etl[p][0] for p in t.pipelines).replace(tzinfo=SGT) + dt.timedelta(minutes=ADOPT_MARGIN_MIN)
+            try:
+                found, unreadable = adoptable_job(tableau, t.id, ds.name, after, own_ids) if after is not None else (None, 0)
+            except PatBusy:
+                raise
+            except Exception as e:
+                action, reason = lookup_failed(e)
+            else:
+                if found is not None:
+                    by = owner if owner and owner != "unknown" else "another job"
+                    action = "adopt"
+                    reason = "already refreshed by %s (Tableau job %s, created %s): not refreshing again" % (
+                        by, found[0].id, found[1].astimezone(SGT).strftime("%H:%M"))
+                    msg = OWNER_MSG % owner if owner and owner != "unknown" else ADOPT_MSG
+                    summary["adopted"].append((t.id, ds.name, found, msg))
+                elif unreadable:
+                    action, reason = "skip", "waiting: %d refresh job(s) of this extract by someone else could not be read" % unreadable
+        incomplete = bool(owners.get("o", ({}, []))[1])
+        if action == "refresh" and owner and not (own_obj is not None and own_obj.soft and not incomplete):
+            action = "skip"
+            reason = ("waiting: %s refreshes this extract; this script never refreshes it" % owner
+                      if owner != "unknown" and not (own_obj is not None and own_obj.soft)
+                      else "waiting: the other refreshers could not be read, so nothing is submitted (no double refresh)")
+            if late and owner != "unknown":
+                summary["alerts"].append({"sub": t.id, "wb": t.name, "code": "refresh_owner_late", "text":
+                                          "extract '%s' is refreshed by %s, which has no successful refresh of it today yet (not run, still "
+                                          "running or failed); reports that need it are held (this script does not refresh it)" % (t.name, owner)})
+        if action == "refresh" and queued_stuck:
+            action, reason = "skip", ("Tableau answered 'already queued' %d times today: a stuck job of someone else? no further submit today, "
+                                      "needs a human" % queued_stuck)
         if action == "refresh" and "r" not in busy:
             try:
-                busy["r"] = tableau_busy(tableau, [j["job"] for j in jobs])
+                busy["r"] = tableau_busy(tableau, own_ids)
+            except PatBusy:
+                raise
             except Exception as e:
                 busy["r"] = e
             if isinstance(busy["r"], tuple) and busy["r"][0] + busy["r"][1]:
@@ -653,34 +892,24 @@ def run(cur, tableau, *, execute, today, timeout_s=TIMEOUT_MIN * 60, poll_s=POLL
         if action == "refresh":
             b = busy["r"]
             if isinstance(b, Exception):
-                action, reason = "skip", "Tableau job lookup failed (%s): skipped" % type(b).__name__
-                summary["lookup_failed"] += 1
+                action, reason = lookup_failed(b)
             elif b and b[0] + b[1]:
                 action, reason = "skip", "waiting: Tableau busy (%d queued, %d running)" % b[:2]
-        if action == "refresh":
-            ds, why, failed = check_target(tableau, t)
-            if ds is None:
-                action, reason = "skip", why
-                summary["lookup_failed"] += failed
-            else:
-                try:
-                    other = active_refresh_job(tableau, ds.name)
-                except Exception as e:
-                    action, reason = "skip", "Tableau job lookup failed (%s): skipped" % type(e).__name__
-                    summary["lookup_failed"] += 1
-                else:
-                    if other is not None:
-                        action = "skip"
-                        reason = "a refresh job is already queued/running on Tableau (job %s, started by someone else?)" % other.id
+                if late:
+                    summary["alerts"].append({"sub": t.id, "wb": t.name, "code": "refresh_waiting_busy", "text":
+                                              "extract '%s' is ready to refresh but Tableau is busy with other jobs; reports that "
+                                              "need it are held until it is refreshed" % t.name})
         if action == "skip" and reason.startswith("waiting"):
             summary["waiting"] += 1
         detail = "; ".join(pipeline_text(p, k, etl) for p, k in sorted(t.pipelines.items()))
         log.info("%s [%s] workbooks=%d via=%s -> %s: %s | %s", t.name, t.id, len(t.workbooks), "+".join(sorted(t.via)) or "-",
-                 "REFRESH" if action == "refresh" else "skip", reason, detail)
+                 {"refresh": "REFRESH", "adopt": "ADOPT"}.get(action, "skip"), reason, detail)
         if action == "refresh":
             summary["refresh"].append(t.id)
             summary["scheduled"] = summary.get("scheduled", 0) + ("extract schedule" in t.via)
             ready.append((t, ds))
+        elif action == "adopt":
+            pass   # recorded below; neither refreshed nor counted as skipped
         else:
             summary["skip"][t.id] = reason
     # The concurrency cap counts jobs of earlier runs that are still running (a long extract outlives its run), not only this run's.
@@ -695,8 +924,12 @@ def run(cur, tableau, *, execute, today, timeout_s=TIMEOUT_MIN * 60, poll_s=POLL
                  in_flight, max_concurrent, len(ready) - slots)
         ready = ready[:slots]
     if not execute:
-        log.info("DRY RUN: would submit %d refresh(es); nothing was written to Tableau or the DWH", len(ready))
+        log.info("DRY RUN: would submit %d refresh(es) and adopt %d refresh(es) of another job; nothing was written to Tableau or the DWH",
+                 len(ready), len(summary["adopted"]))
         return summary
+    for tid, name, (job, created), msg in summary["adopted"]:
+        adopt_row(cur, tid, job, created, msg)
+        log.info("ADOPTED %s [%s]: Tableau job %s finished OK; recorded as our Succeeded refresh", name, tid, job.id)
     if ready:
         summary["results"] = submit_and_wait(cur, tableau, ready, timeout_s, poll_s, slots, stagger_s)
         names = {t.id: t.name for t, _ in ready}
@@ -714,9 +947,9 @@ def summary_line(s, execute):
     failed = sum(v in ("Failed", "TimedOut", "Cancelled") for v in res) + s["lookup_failed"]
     refreshed = sum(v == "Succeeded" for v in res) if execute else len(s["refresh"])
     skipped = len(s["skip"]) - s["waiting"]
-    return "RUN SUMMARY mode=%s refreshed=%d%s waiting=%d skipped=%d failed=%d lookup_failed=%d due_by_extract_schedule=%d taken_over=%d taken_over_excluded=%d" % (
+    return "RUN SUMMARY mode=%s refreshed=%d%s waiting=%d skipped=%d failed=%d lookup_failed=%d due_by_extract_schedule=%d taken_over=%d taken_over_excluded=%d adopted=%d" % (
         "execute" if execute else "dry-run", refreshed, "" if execute else "(would)", s["waiting"], skipped, failed,
-        s["lookup_failed"], s.get("scheduled", 0), s.get("taken_over", 0), s.get("taken_over_excluded", 0))
+        s["lookup_failed"], s.get("scheduled", 0), s.get("taken_over", 0), s.get("taken_over_excluded", 0), len(s.get("adopted", [])))
 
 
 def exit_code(s):
@@ -742,18 +975,21 @@ class LazyTableau:
     With lock_cur (a DWH cursor) the shared PAT session applock is taken before the first sign-in and held until close();
     if another script holds it, PatBusy is raised instead of signing in."""
 
-    def __init__(self, lock_cur=None, owner="?", lock_name=None):
+    def __init__(self, lock_cur=None, owner="?", lock_name=None, lock_wait_s=None):
         self.server = None
         self.lock_cur = lock_cur
         self.locked = False
         self.owner = owner
         self.lock_name = lock_name or PAT_LOCK   # tests pass their own name so they never touch the real lock
+        # Wait briefly for the shared session instead of skipping at once: t11 (:30) and t6 (:34) start close to t4 (:32).
+        self.lock_wait_s = float(os.environ.get("PAT_LOCK_WAIT_S", 120)) if lock_wait_s is None else lock_wait_s
 
     def _lock(self):
         if self.lock_cur is None or self.locked:
             return
         got = self.lock_cur.execute("DECLARE @r int; EXEC @r = sp_getapplock @Resource = ?, @LockMode = 'Exclusive', "
-                                    "@LockOwner = 'Session', @LockTimeout = 0; SELECT @r", self.lock_name).fetchone()[0]
+                                    "@LockOwner = 'Session', @LockTimeout = ?; SELECT @r", self.lock_name,
+                                    int(self.lock_wait_s * 1000)).fetchone()[0]
         if got < 0:
             log.warning("Another script is using the Tableau PAT session (lock %s); skipping this run, it retries next time", PAT_LOCK)
             raise PatBusy()

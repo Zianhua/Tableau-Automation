@@ -12,6 +12,7 @@ import logging
 import os
 import smtplib
 import subprocess
+import re
 import sys
 import tempfile
 import time
@@ -35,6 +36,41 @@ TMP = Path(tempfile.mkdtemp(prefix="r2checks_"))
 fails = []
 D = dt.date
 
+
+
+SQL_WRITE = re.compile(
+    r"\b(?:INSERT\s+(?!INTO\b)(?!@)[\[\w#]|INTO\s+(?!@)[\[\w#]|UPDATE\s+[\[\w#]|DELETE\s+(?:FROM\s+)?[\[\w#]|MERGE\s+(?:INTO\s+)?[\[\w#]"
+    r"|(?:CREATE|ALTER|DROP|TRUNCATE)\s+(?:TABLE|VIEW|PROC|PROCEDURE|FUNCTION|INDEX|SCHEMA|USER|ROLE|LOGIN|TRIGGER|DATABASE|SYNONYM)\b"
+    r"|(?:GRANT|REVOKE|DENY)\s+(?:SELECT|INSERT|UPDATE|DELETE|EXEC|EXECUTE|VIEW|ALTER|CONTROL|CONNECT|REFERENCES)\b"
+    r"|EXEC(?:UTE)?\s+(?!\()[\[\w@])", re.I)
+
+
+def sql_writes(t):
+    """Write statements in a SQL text, comments removed. String literals are KEPT (dynamic SQL in EXEC('...') is checked too), so
+    plain messages must not read like statements. Table-variable inserts (INSERT @t / INTO @t) are allowed."""
+    code = re.sub(r"/\*.*?\*/", "", t, flags=re.S)
+    out = []
+    for line in code.splitlines():   # strip -- comments, but not a -- inside a string literal
+        q, cut = False, len(line)
+        for i, ch in enumerate(line):
+            if ch == "'":
+                q = not q
+            elif not q and line.startswith("--", i):
+                cut = i
+                break
+        out.append(line[:cut])
+    return SQL_WRITE.findall("\n".join(out))
+
+
+def test_sql_writes():
+    bad = ["UPDATE [Integration].[X] SET a = 1", "DELETE [x] WHERE 1 = 1", "EXEC ('DELETE FROM Integration.X')", "SELECT a INTO #t FROM x",
+           "SELECT a INTO dbo.T FROM x", "INSERT Integration.Y VALUES (1)", "MERGE Integration.Z AS t USING s ON 1 = 0 WHEN MATCHED THEN DELETE;",
+           "GRANT SELECT ON x TO y", "DROP TABLE x", "EXEC sp_rename 'a', 'b'", "SELECT '--' AS c; UPDATE x SET a = 1"]
+    ok = ["INSERT @need VALUES (1)", "INSERT INTO @t SELECT 1", "SELECT 'MISSING GRANT' AS s", "-- UPDATE x SET a = 1",
+          "/* DELETE FROM x */ SELECT 1", "EXEC ('SELECT 1 FROM x')", "SELECT 'rows are removed' AS why"]
+    check("SQL read-only scan flags every write form (bracketed names, dynamic SQL, SELECT INTO, procedure calls, '--' in a string)",
+          all(sql_writes(x) for x in bad), [x for x in bad if not sql_writes(x)])
+    check("... and does not flag table-variable inserts, messages or comments", not any(sql_writes(x) for x in ok), [x for x in ok if sql_writes(x)])
 
 def check(name, ok, detail=""):
     print("%s  %s %s" % ("PASS" if ok else "FAIL", name, detail))
@@ -431,6 +467,8 @@ def test_summary_sql_hash(cur, today):
     cur.execute("INSERT Integration.Tableau_SubscriptionSendLog (Subscription_id, Status, ClaimedAt, Message) VALUES ('T6TEST-Y3', 'TimedOut', DATEADD(day, -1, SYSDATETIMEOFFSET()), 'old')")
     env = r1.mail_env("r2sum")
     now = dt.datetime.now(ops.SGT)
+    if now.hour < 5:   # markers "4 hours ago" must stay on the same day: run the scenario as if it were 15:00
+        now = now.replace(hour=15)
     ops.write_marker("t4", "execute", 0, "RUN SUMMARY x", env=env, now=now - dt.timedelta(hours=4))
     ops.write_marker("t4", "dry-run", 0, "x", env=env, now=now - dt.timedelta(minutes=2))
     d = ds_.collect(cur, today, now.replace(tzinfo=None), 90, dict(env, SCHEDULE_MODE="honour"))
@@ -453,6 +491,10 @@ def test_summary_sql_hash(cur, today):
     for f in (ROOT / "scripts" / "sql").glob("*.sql"):
         t = f.read_text(encoding="utf-8")
         lines = [x.strip() for x in t.splitlines() if x.strip()]
+        if f.name == "prod_precheck.sql":   # read-only by design, runs on any warehouse: it must not contain a single write
+            check("prod_precheck.sql is read-only (no INSERT/UPDATE/DELETE/MERGE/SELECT INTO/DDL/GRANT/procedure call outside comments)",
+                  not sql_writes(t), str(sql_writes(t)))
+            continue
         check("%s: guard checks DB_NAME() AND @@SERVERNAME, sets NOEXEC ON, and the file ends with SET NOEXEC OFF; GO" % f.name,
               "DB_NAME()" in t and "@@SERVERNAME" in t and "SET NOEXEC ON" in t and lines[-1] == "GO" and lines[-2] == "SET NOEXEC OFF;")
     c6.cleanup(cur)
@@ -717,6 +759,9 @@ today_ = None
 
 
 def main():
+    import testguard  # noqa: E402  dev warehouse only, whatever .env says
+    testguard.require_dev()
+    test_sql_writes()
     global cur_, today_
     os.environ["LOG_DIR"] = str(TMP / "logs")   # never attach the real out/*.log
     os.environ["LASTRUN_DIR"] = str(TMP / "lastrun_default")

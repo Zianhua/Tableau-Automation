@@ -987,6 +987,8 @@ def test_daily_summary(cur, today):
     cur.execute("INSERT Integration.Tableau_SubscriptionSendLog (Subscription_id, Status, SentAt, Message) VALUES ('T6TEST-D1', 'Sent', SYSDATETIMEOFFSET(), 'x')")
     env = mail_env("summary")
     now = dt.datetime.now(ops.SGT)
+    if now.hour < 5:   # markers "4 hours ago" must stay on the same day: run the scenario as if it were 15:00
+        now = now.replace(hour=15)
     ops.write_marker("t6", "execute", 0, "RUN SUMMARY mode=execute no_allowed_recipient=2 rejected=0 sent=1", env=env, now=now - dt.timedelta(minutes=10))
     ops.write_marker("t4", "execute", 0, "RUN SUMMARY x", env=env, now=now - dt.timedelta(hours=4))
     ops.write_marker("t2", "dry-run", 0, "x", env=env, now=now - dt.timedelta(hours=4))
@@ -1400,6 +1402,8 @@ def checksum(cur):
 
 
 def main():
+    import testguard  # noqa: E402  dev warehouse only, whatever .env says
+    testguard.require_dev()
     os.environ['EVENTLOG_DISABLED'] = '1'
     os.environ.setdefault('LOG_DIR', tempfile.mkdtemp(prefix='logs_'))   # tests never write the real out/*.log
     os.environ['LASTRUN_DIR'] = str(TMP / 'lastrun_default')   # never write real last-run markers

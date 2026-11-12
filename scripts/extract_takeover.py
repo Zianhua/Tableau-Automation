@@ -94,6 +94,7 @@ class Config:
     id_like: str = "%"                       # tests only
     alert: object = None
     ses: bool = False
+    force: bool = False                      # --force: restore even if t4 refreshed the extract today (accepts a second refresh today)
 
 
 def parse_list(values):
@@ -126,7 +127,7 @@ def build_config(a, env):
     # orphan alert (mailed in a dry run too, see send_alerts) uses the same transport rules as every other monitor.
     alert = ops.alert_config(a.ses, env, "extract_takeover", execute=True, local_smtp=getattr(a, "local_smtp", False))
     return Config(execute=a.execute, ids=ids, owner_user_ids=owners, max_new=max_new, max_mapping_age_h=a.max_mapping_age_h,
-                  alert=alert, ses=alert.ses)
+                  alert=alert, ses=alert.ses, force=getattr(a, "force", False))
 
 
 # ---------- DWH ----------
@@ -192,8 +193,16 @@ def old_job_state(ctx):
     if ctx.old_job is None:
         cur = ctx.cur
         if cur.execute("SELECT OBJECT_ID(?)", OLD_TABLE).fetchone()[0] is None:
-            ctx.old_job = "absent"
-            log.info("%s does not exist here: no old-job row to switch off or back", OLD_TABLE)
+            # OBJECT_ID is also NULL when this account may not SEE the table: "absent" then really means "unknown", and a takeover
+            # would delete the Tableau task while the old job keeps refreshing. Refused unless the owner states the table really
+            # does not exist on this server (EXTRACT_TAKEOVER_OLD_TABLE_ABSENT_OK=1).
+            if str(os.environ.get("EXTRACT_TAKEOVER_OLD_TABLE_ABSENT_OK", "")).strip().lower() in ("1", "yes", "true", "on"):
+                ctx.old_job = "absent"
+                log.info("%s does not exist here (EXTRACT_TAKEOVER_OLD_TABLE_ABSENT_OK=1): no old-job row to switch off or back", OLD_TABLE)
+            else:
+                ctx.old_job = "no_permission"
+                log.warning("%s is not visible to this account (missing, or no permission): new takeovers are refused; set "
+                            "EXTRACT_TAKEOVER_OLD_TABLE_ABSENT_OK=1 only if the table really does not exist on this server", OLD_TABLE)
         elif cur.execute("SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID(?) AND name IN ('Mapping_id', 'DataSource_id', 'Active_Flag')", OLD_TABLE).fetchone()[0] != 3:
             ctx.old_job = "unexpected"
         elif not cur.execute("SELECT HAS_PERMS_BY_NAME(?, 'OBJECT', 'UPDATE')", OLD_TABLE).fetchone()[0]:
@@ -420,7 +429,7 @@ def consider(ctx, c):
     if old_job_state(ctx) in ("unexpected", "no_permission"):
         ctx.n["failed"] += 1
         why = ("%s has other columns than the old job uses (Mapping_id, DataSource_id, Active_Flag)" % OLD_TABLE if ctx.old_job == "unexpected"
-               else "this account may not UPDATE %s" % OLD_TABLE)
+               else "this account cannot see or may not UPDATE %s" % OLD_TABLE)
         log.error("%s '%s': NOT taken over, %s, so the old refresh job could not be switched off and would keep refreshing it", c.task_id, name, why)
         ctx.event(c.task_id, name, "takeover_failed", "not taken over: " + why)
         return
@@ -569,6 +578,14 @@ def restore(ctx, task_ids, restore_all):
             if ids:
                 log.info("DRY RUN: and set the old refresh job's row(s) Mapping_id %s in %s back to their original value", ids, OLD_TABLE)
             continue
+        done_today = cur.execute("SELECT COUNT(*) FROM Integration.Tableau_RefreshJob WHERE DataSource_id = ? AND SubmittedDate = ? "
+                                 "AND Status NOT IN ('Failed', 'Cancelled')", target, ctx.today.isoformat()).fetchone()[0]
+        if done_today and not cfg.force:
+            n["failed"] += 1
+            log.error("%s '%s': NOT restored today: this script already refreshed it today (%d job(s)), and the old refresh job / Tableau would "
+                      "refresh it a second time. Restore it tomorrow before the morning ETLs, or add --force to accept a second refresh", tid, name, done_today)
+            ctx.event(tid, name, "restore_deferred", "not restored today: already refreshed by the script today (restore tomorrow morning, or --force)")
+            continue
         try:
             same = [t for t in ctx.live.values() if t.target is not None and t.target.id == target and t.schedule_id == sched]
             for t in ctx.live.values():
@@ -652,6 +669,7 @@ def main(argv=None):
     ap.add_argument("--max-new", type=int, default=None, help="cap on NEW takeovers per run (default 5, env EXTRACT_TAKEOVER_MAX_NEW)")
     ap.add_argument("--restore", action="append", help="rollback: re-create this task (original task id, repeatable)")
     ap.add_argument("--restore-all", action="store_true", help="rollback: restore every open takeover")
+    ap.add_argument("--force", action="store_true", help="restore even if the script refreshed the extract today (the old job / Tableau may then refresh it a second time today)")
     ap.add_argument("--smtp", "--ses", dest="ses", action="store_true", help="alert mail through the real SMTP server (needs --execute); or MAIL_TRANSPORT=smtp")
     ap.add_argument("--local-smtp", action="store_true", help="force the local test sink even if MAIL_TRANSPORT=smtp")
     ap.add_argument("--local-host", default="127.0.0.1")
@@ -690,7 +708,7 @@ def main(argv=None):
         return fatal("DWH connect or guard failed: %s" % (e if isinstance(e, SystemExit) else type(e).__name__))
     if cur.execute("SELECT COUNT(*) FROM sys.tables WHERE name IN ('Tableau_ExtractTask', 'Tableau_ExtractTaskBackup') AND schema_id = SCHEMA_ID('Integration')").fetchone()[0] != 2             or cur.execute("SELECT COL_LENGTH('Integration.Tableau_ExtractTaskBackup', 'NoRetake')").fetchone()[0] is None \
             or cur.execute("SELECT COL_LENGTH('Integration.Tableau_ExtractTaskBackup', 'OldJobMappingIds')").fetchone()[0] is None:
-        return fatal("Integration.Tableau_ExtractTask / Tableau_ExtractTaskBackup (with NoRetake and OldJobMappingIds) missing: the objects come from the DBJR document (ITSC_384043_TableauEnhancement_ML)")
+        return fatal("Integration.Tableau_ExtractTask / Tableau_ExtractTaskBackup (with NoRetake and OldJobMappingIds) missing: the objects come from the DBJR document (ITSC_0003_TableauEnhancement_ML)")
     if cfg.execute:
         got = cur.execute("DECLARE @r int; EXEC @r = sp_getapplock @Resource = ?, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 0; SELECT @r", LOCK_NAME).fetchone()[0]
         if got < 0:

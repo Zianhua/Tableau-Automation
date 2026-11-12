@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-  One-shot UAT install on the Tableau host: venv, packages, folder rights, Event Log source, dry-run check, DRY-RUN scheduled tasks.
+  One-shot install on the Tableau host (UAT or production; everything environment-specific comes from .env): venv, packages,
+  folder rights, Event Log source, dry-run check, DRY-RUN scheduled tasks.
   Run from an ELEVATED PowerShell:  .\scripts\schedule\deploy_uat.ps1   (tasks run as the logged-in account unless -ServiceAccount is given)
   Safe to re-run. Nothing is written to the warehouse or Tableau (dry-run only); tasks are registered in DRY-RUN mode.
 #>
@@ -19,7 +20,7 @@ $cfg = @{}
 Get-Content .env | Where-Object { $_ -match '^\s*([A-Za-z0-9_]+)\s*=\s*([^#]*?)\s*(#.*)?$' } | ForEach-Object { $cfg[$Matches[1]] = $Matches[2] }
 foreach ($k in 'CONN_SERVER','CONN_DATABASE','DEV_DWH_SERVER','DEV_DWH_DATABASE','TABLEAU_SERVER_URL','TABLEAU_PAT_NAME','TABLEAU_PAT_SECRET') { if (-not $cfg[$k]) { throw ".env is missing $k" } }
 if ($cfg['CONN_SERVER'] -ne $cfg['DEV_DWH_SERVER']) { throw ".env CONN_SERVER ($($cfg['CONN_SERVER'])) must equal DEV_DWH_SERVER ($($cfg['DEV_DWH_SERVER']))" }
-if ($cfg['MAIL_TRANSPORT'] -ne 'local') { throw '.env MAIL_TRANSPORT must be local for the first install' }
+if ($cfg['MAIL_TRANSPORT'] -and $cfg['MAIL_TRANSPORT'] -ne 'local') { throw '.env MAIL_TRANSPORT must be local (or unset) for the first install' }
 $dwh = $cfg['CONN_SERVER']; $tab = [uri]$cfg['TABLEAU_SERVER_URL']
 Write-Host "Warehouse: $dwh / $($cfg['CONN_DATABASE'])   Tableau: $($tab.AbsoluteUri)"
 if ((Get-TimeZone).Id -ne 'Singapore Standard Time') { Write-Warning "Time zone is $((Get-TimeZone).Id), tasks use host local time: expected Singapore Standard Time" }

@@ -48,3 +48,6 @@ testdata/
 # Office lock files and scratch
 ~$*
 *.tmp
+
+# Local reference material (SSIS packages, documents): never committed or published
+Reference/

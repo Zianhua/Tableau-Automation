@@ -135,7 +135,7 @@ The scripts and every SQL file refuse to run unless the server is the one named 
 
 ## 6. Apply the database changes (with the DBA) - BEFORE any script runs
 
-Follow [DB_CHANGES.md](DB_CHANGES.md): the summary table at its top, then sections 3 and 9. The objects are created from the DBJR document (ITSC_384043_TableauEnhancement_ML); the creation scripts are no longer shipped in this repo (only rollbacks and `T3_load_registry.sql` are), then the single grant script for the service account. Nothing in steps 8 to 10 may run before this is done. Then verify, as the DBA:
+Follow [DB_CHANGES.md](DB_CHANGES.md): the summary table at its top, then sections 3 and 9. The objects are created from the DBJR document (ITSC_0003_TableauEnhancement_ML); the creation scripts are no longer shipped in this repo (only rollbacks and `T3_load_registry.sql` are), then the single grant script for the service account. Nothing in steps 8 to 10 may run before this is done. Then verify, as the DBA:
 
 ```sql
 SELECT CAST(value AS nvarchar(60)) AS Tag, COUNT(*) AS Objects

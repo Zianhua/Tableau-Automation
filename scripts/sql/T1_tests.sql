@@ -5,7 +5,7 @@ GO
 /*
 T1 tests. Dev DWH only. Test rows are all named TEST-* / TESTSCH and are deleted at the start and at the end
 (no outer transaction: some cases raise errors on purpose).
-Results are returned as the last result set. Needs the mapping objects (DBJR document, ITSC_384043_TableauEnhancement_ML) and T3_load_registry.sql.
+Results are returned as the last result set. Needs the mapping objects (DBJR document, ITSC_0003_TableauEnhancement_ML) and T3_load_registry.sql.
 The two-session claim race is in T1_concurrency_test.ps1.
 The readiness cases R8a..R8h at the top of it are also covered by r1_checks.py (rolled back, no send log).
 */

@@ -509,6 +509,11 @@ class Gate:
             "SELECT DataSource_id, CAST(MAX(SWITCHOFFSET(SubmittedAt, '+08:00')) AS datetime2(0)) "
             "FROM Integration.Tableau_RefreshJob WHERE Status = 'Succeeded' AND FinishedAt IS NOT NULL "
             "AND SubmittedDate = ? GROUP BY DataSource_id", today.isoformat()).fetchall()}
+        # Extracts whose own refresher (old job / Tableau schedule) refreshed them today and t4 recorded it ("adopted-owner"): fresh as
+        # is, whatever the ETL times. Owner's decision: no extra refresh by this solution; the old job keeps doing its thing.
+        self.owner_refreshed = {r[0] for r in cur.execute(
+            "SELECT DISTINCT DataSource_id FROM Integration.Tableau_RefreshJob WHERE Status = 'Succeeded' AND FinishedAt IS NOT NULL "
+            "AND SubmittedDate = ? AND Message LIKE ?", today.isoformat(), t4.OWNER_PREFIX + "%").fetchall()}
 
     def inflight_targets(self):
         """Refresh targets with a 'Submitted' (in-flight) row in Tableau_RefreshJob, loaded once per run."""
@@ -600,7 +605,9 @@ class Gate:
                 else:
                     last_etl = max(self.etl[p][0] for p in tp)
                     done = self.refreshed.get(tgt)
-                    if done is None or done <= last_etl:
+                    if tgt in self.owner_refreshed:
+                        pass
+                    elif done is None or done <= last_etl:
                         waits.append("extract not refreshed since the last ETL (%s)" % last_etl.strftime("%H:%M"))
             elif s["kind"] != "Live":
                 return False, "blocked", "source kind %s unknown" % s["kind"]

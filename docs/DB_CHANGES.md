@@ -1,6 +1,6 @@
 # Database changes
 
-Service account: [DOMAIN\svc_tableau]. The objects are created from the DBJR document (ITSC_384043_TableauEnhancement_ML), no longer from files in this repo; create them before deploying the code. Detail: DB_CHANGES_DETAIL.md.
+Service account: [DOMAIN\svc_tableau]. The objects are created from the DBJR document (ITSC_0003_TableauEnhancement_ML), no longer from files in this repo; create them before deploying the code. Detail: DB_CHANGES_DETAIL.md.
 
 ## Create (tables)
 - Integration.Tableau_PipelineTable
