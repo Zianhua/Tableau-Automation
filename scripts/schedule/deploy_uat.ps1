@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
-  One-shot install on the Tableau host (UAT or production; everything environment-specific comes from .env): venv, packages,
-  folder rights, Event Log source, dry-run check, DRY-RUN scheduled tasks.
+  One-shot install on the Tableau host (UAT or production; everything environment-specific comes from .env): program check
+  (bin\tableau_automation.exe, or a venv with the pinned packages when there is no bin\), folder rights, Event Log source,
+  dry-run check, DRY-RUN scheduled tasks. With bin\ the host needs no Python and no PyPI access.
   Run from an ELEVATED PowerShell:  .\scripts\schedule\deploy_uat.ps1   (tasks run as the logged-in account unless -ServiceAccount is given)
   Safe to re-run. Nothing is written to the warehouse or Tableau (dry-run only); tasks are registered in DRY-RUN mode.
 #>
@@ -24,20 +25,31 @@ if ($cfg['MAIL_TRANSPORT'] -and $cfg['MAIL_TRANSPORT'] -ne 'local') { throw '.en
 $dwh = $cfg['CONN_SERVER']; $tab = [uri]$cfg['TABLEAU_SERVER_URL']
 Write-Host "Warehouse: $dwh / $($cfg['CONN_DATABASE'])   Tableau: $($tab.AbsoluteUri)"
 if ((Get-TimeZone).Id -ne 'Singapore Standard Time') { Write-Warning "Time zone is $((Get-TimeZone).Id), tasks use host local time: expected Singapore Standard Time" }
-if (-not (Get-OdbcDriver -Name 'ODBC Driver 17 for SQL Server' -ErrorAction SilentlyContinue)) { throw 'ODBC Driver 17 for SQL Server is not installed' }
+$drv = ($cfg['CONN_DRIVER'] -replace '[{}]', '').Trim()
+if (-not $drv) { throw '.env is missing CONN_DRIVER (ODBC Driver 18 for SQL Server or ODBC Driver 17 for SQL Server)' }
+if (-not (Get-OdbcDriver -Name $drv -Platform '64-bit' -ErrorAction SilentlyContinue)) { throw ".env CONN_DRIVER '$drv' is not installed on this host (Get-OdbcDriver lists the installed ones)" }
 foreach ($t in @(@($dwh,1433), @($tab.Host,$tab.Port))) {
     $r = Test-NetConnection $t[0] -Port $t[1] -WarningAction SilentlyContinue
     if (-not $r.TcpTestSucceeded) { throw "Cannot reach $($t[0]):$($t[1])" }
 }
-$sys = (Get-Command python -ErrorAction Stop).Source
-& $sys --version
+$exe = Join-Path $app 'bin\tableau_automation.exe'
+$packaged = Test-Path $exe
 
-Step '2/6 virtual environment and packages'
-if (-not (Test-Path .venv\Scripts\python.exe)) { & $sys -m venv .venv }
-$py = Join-Path $app '.venv\Scripts\python.exe'
-& $py -m pip install --upgrade pip
-& $py -m pip install tableauserverclient==0.42 pyodbc==5.3.0 python-dotenv==1.2.4 sqlglot==30.13.0 Pillow==13.0.0
-& $py -c "import tableauserverclient, pyodbc, dotenv, sqlglot, PIL; print('imports ok')"
+if ($packaged) {
+    Step '2/6 packaged program (no Python needed)'
+    & $exe selfcheck
+    if ($LASTEXITCODE -ne 0) { throw "$exe selfcheck failed" }
+}
+else {
+    $sys = (Get-Command python -ErrorAction Stop).Source
+    & $sys --version
+    Step '2/6 virtual environment and packages'
+    if (-not (Test-Path .venv\Scripts\python.exe)) { & $sys -m venv .venv }
+    $py = Join-Path $app '.venv\Scripts\python.exe'
+    & $py -m pip install --upgrade pip
+    & $py -m pip install tableauserverclient==0.42 pyodbc==5.3.0 python-dotenv==1.2.4 sqlglot==30.13.0 Pillow==13.0.0
+    & $py -c "import tableauserverclient, pyodbc, dotenv, sqlglot, PIL; print('imports ok')"
+}
 
 Step '3/6 folder rights'
 New-Item -ItemType Directory -Force out | Out-Null
@@ -50,7 +62,7 @@ Step '4/6 Event Log source'
 eventcreate /L APPLICATION /T INFORMATION /ID 1 /SO TableauAutomation /D "registered" 2>&1 | Out-Host
 
 Step '5/6 dry-run check of the mapping sync (reads only)'
-& $py scripts\t2_mapping_sync.py --dry-run
+if ($packaged) { & $exe t2_mapping_sync --dry-run } else { & $py scripts\t2_mapping_sync.py --dry-run }
 if ($LASTEXITCODE -ne 0) { Write-Warning "t2 dry run exited $LASTEXITCODE (see lines above). If it is a database login error, your own login may lack rights the service account has: re-test as the service account later." }
 
 Step '6/6 scheduled tasks (DRY-RUN mode, asks for the account password)'

@@ -19,8 +19,9 @@ venv/
 __pycache__/
 *.pyc
 
-# Build output and backups
+# Build output and backups (bin\ is the packaged program from scripts\build_exe.ps1: committed, all of it)
 *.exe
+!bin/**
 build/
 dist/
 *.spec

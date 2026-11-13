@@ -6,6 +6,8 @@ checked during the pilot.
 
 **Deploying to a server?** See [DEPLOYMENT_PROD.md](DEPLOYMENT_PROD.md) (production) or [DEPLOYMENT_UAT.md](DEPLOYMENT_UAT.md) (UAT) for the install walk-through and run `scripts/sql/prod_precheck.sql` (read-only) on the target warehouse first: every object, column, grant and seed row the scripts need must say OK. The database changes themselves come from the DBJR (the DBA applies them); the test suites are not deployed. This runbook is for operating the system once it runs.
 
+**Packaged program.** A host installed with `bin\tableau_automation.exe` has no Python. Every command below written as `python scripts\<name>.py <arguments>` (or `& $py scripts\<name>.py ...`) is run there as `bin\tableau_automation.exe <name> <arguments>` from the install folder: the same script, arguments, logs and exit code (commands: t2_mapping_sync, extract_takeover, t11_pause, t4_refresh, t6_send, watchdog, daily_summary, review_list). `bin\tableau_automation.exe selfcheck` shows the install folder and the ODBC drivers and refuses a `bin\` that was not built from the `scripts\*.py` next to it. After any code change: `scripts\build_exe.ps1` on the build machine, commit `bin\` together with the code, then `install_on_host.ps1 -Update` on the host (outside the task window).
+
 ## 1. What runs, in which order
 
 | Script | What it does | When | Task Scheduler settings |

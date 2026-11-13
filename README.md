@@ -24,6 +24,8 @@ Script-driven refresh and delivery of Tableau reports that use several extracts,
 
 **Deploying:** `scripts/sql/prod_precheck.sql` on the target warehouse, then [DEPLOYMENT_PROD.md](docs/DEPLOYMENT_PROD.md) (or [DEPLOYMENT_UAT.md](docs/DEPLOYMENT_UAT.md)), then [RUNBOOK.md](docs/RUNBOOK.md). The deployable set is the scripts without the `*_checks.py` test suites (which only ever run against the dev warehouse).
 
+**Packaged program (`bin\`):** `scripts\build_exe.ps1` packages the scripts with PyInstaller into `bin\tableau_automation.exe` (one folder, the Python runtime and the pinned packages included), so the host needs no Python. `tableau_automation.exe <script name> <arguments>` runs that script unchanged; the scheduled tasks use it when `bin\` exists. Rebuild and commit `bin\` with every code change: `selfcheck` (run by the install and task scripts) refuses a `bin\` built from other code. `bin\` is not in the public copy.
+
 ## Local configuration
 
 Environment-specific values are not hard-coded. The Python and PowerShell scripts read them from `.env` (copy `.env.example`); a guard whose key is unset refuses to run (fail closed). Keys:

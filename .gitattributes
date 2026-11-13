@@ -1,0 +1,2 @@
+# The packaged program is stored byte for byte (no line-ending conversion)
+bin/** -text -diff

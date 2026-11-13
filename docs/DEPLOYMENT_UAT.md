@@ -4,6 +4,8 @@ Target: warehouse `<UAT_DWH_SERVER>` / `CQGlobalSGDW`, Tableau `http://tableau-u
 
 Everything below is run in **PowerShell as administrator** on the Tableau host. Install folder: `<INSTALL_DIR>\TableauSubscriptionAutomation`.
 
+With the packaged program (`bin\tableau_automation.exe` in the download) no Python or venv is needed: wherever this page says `& $py scripts\<name>.py <arguments>`, run `& .\bin\tableau_automation.exe <name> <arguments>` (same script and arguments), and `deploy_uat.ps1` / `register_tasks.ps1` use the exe automatically.
+
 ## 1. Get the code
 
 Repository (public, values such as server names and emails are blanked in it, they come from `.env`):

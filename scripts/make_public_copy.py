@@ -3,7 +3,8 @@
     python scripts/make_public_copy.py TARGET_DIR
 
 The substitution map is publish_map.local.json in the repo root (gitignored): {"real value": "placeholder", ...}.
-Matching is case-insensitive, longest key first. Only tracked files are copied (git ls-files); binary files are copied as they are.
+Matching is case-insensitive, longest key first. Only tracked files are copied (git ls-files); binary files are copied as they are, except bin/ (the packaged program
+holds the unmapped code; a public user builds it with scripts/build_exe.ps1).
 The working tree is never changed.
 """
 import json
@@ -33,6 +34,7 @@ def main():
     lookup = {k.lower(): v for k, v in mapping.items()}
     files = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.splitlines()
     n_changed = 0
+    files = [f for f in files if not f.startswith("bin/")]   # the packaged program holds the unmapped code: never published
     for rel in files:
         src, dst = ROOT / rel, target / rel
         if not src.is_file():

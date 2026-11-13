@@ -34,9 +34,12 @@
   Install folder = working directory of every task. The scripts read RepoRoot\.env and write RepoRoot\out\ (logs,
   lastrun markers, KILL file); neither location can be moved. Default: two levels above this script (the repo's
   current location). Pass it explicitly.
+.PARAMETER Exe
+  The packaged program (no Python needed on the host). Default: <RepoRoot>\bin\tableau_automation.exe when it exists and no
+  -PythonExe is given. Each task then runs "tableau_automation.exe <task name> <arguments>": the same script, arguments and exit code.
 .PARAMETER PythonExe
-  Full path of python.exe. Default order: <RepoRoot>\.venv\Scripts\python.exe, then a machine-wide python on PATH,
-  then (with a warning) a per-user install. An explicit -PythonExe is always used as given.
+  Full path of python.exe, used when there is no bin\tableau_automation.exe (or when given explicitly). Default order:
+  <RepoRoot>\.venv\Scripts\python.exe, then a machine-wide python on PATH, then (with a warning) a per-user install.
 .PARAMETER Live
   Register real-run command lines (adds --execute / drops --dry-run). Default is dry-run only.
 .PARAMETER T11ExtraArgs
@@ -65,6 +68,7 @@
 param(
     [string]$ServiceAccount,
     [string]$RepoRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
+    [string]$Exe,
     [string]$PythonExe,
     [switch]$Live,
     [string]$T11ExtraArgs = '',
@@ -174,13 +178,21 @@ function Get-TaskArgumentLine($Definition) {
     if ($Definition.Name -eq 'extract_takeover') {
         $argText = if ($Live -and $ExtractExtraArgs) { "--execute $ExtractExtraArgs" } else { '--dry-run' }
     }
+    if ($Exe) { return ('{0} {1}' -f $Definition.Name, $argText).Trim() }   # tableau_automation.exe <script name> <arguments>
     return ('-u "{0}" {1}' -f (Join-Path $RepoRoot $Definition.Script), $argText).Trim()
+}
+
+# ---- program: explicit -Exe > bin\tableau_automation.exe (unless -PythonExe) > python ------------
+if (-not $Exe -and -not $PythonExe) {
+    $packaged = Join-Path $RepoRoot 'bin\tableau_automation.exe'
+    if (Test-Path -LiteralPath $packaged) { $Exe = $packaged }
 }
 
 # ---- python: explicit > repo venv > machine-wide > per-user (warn) ------------------------------
 function Test-UserProfilePath([string]$Path) { return ($Path -match '\\Users\\' -or $Path -match '\\AppData\\') }
 
-if (-not $PythonExe) {
+if ($Exe) { $PythonExe = $null }
+elseif (-not $PythonExe) {
     $venv = Join-Path $RepoRoot '.venv\Scripts\python.exe'
     if (Test-Path -LiteralPath $venv) { $PythonExe = $venv }
     else {
@@ -198,12 +210,13 @@ if ([TimeZoneInfo]::Local.Id -ne 'Singapore Standard Time') {
 }
 
 # ---- plan ---------------------------------------------------------------------------------------
-Write-Host "Mode: $mode   Repo: $RepoRoot   Python: $PythonExe   Folder: $TaskPath"
+$program = if ($Exe) { $Exe } else { $PythonExe }
+Write-Host "Mode: $mode   Repo: $RepoRoot   Program: $program   Folder: $TaskPath"
 foreach ($d in $definitions) {
     $durMin = if ($d.DurationMin) { $d.DurationMin } else { 481 }
     $last = ([datetime]::Today.Add([timespan]::Parse($d.At))).AddMinutes($durMin - 1).ToString('HH:mm')
     $when = if ($d.Repeat) { "$($d.At) every 15 min, last start $last" } else { "daily $($d.At)" }
-    Write-Host ("  {0,-16} {1,-38} limit {2,2} min  {3} {4}" -f $d.Name, $when, $d.LimitMin, $PythonExe, (Get-TaskArgumentLine $d))
+    Write-Host ("  {0,-16} {1,-38} limit {2,2} min  {3} {4}" -f $d.Name, $when, $d.LimitMin, $program, (Get-TaskArgumentLine $d))
 }
 if ($Live) { Write-Host "LIVE: t11 allow-list = $T11ExtraArgs" }
 
@@ -213,14 +226,23 @@ if (-not $ServiceAccount) { $ServiceAccount = '<ServiceAccount>' }
 # ---- preflight: fail registration, do not warn --------------------------------------------------
 $problems = @()
 if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot '.env'))) { $problems += "missing $(Join-Path $RepoRoot '.env')" }
-foreach ($d in $definitions) {
-    $p = Join-Path $RepoRoot $d.Script
-    if (-not (Test-Path -LiteralPath $p)) { $problems += "missing $p" }
+if ($Exe) {
+    if (-not (Test-Path -LiteralPath $Exe)) { $problems += "program not found: '$Exe'" }
+    else {
+        try { $v = & $Exe selfcheck 2>&1; if ($LASTEXITCODE -ne 0) { $problems += "$Exe selfcheck failed: $($v -join ' ')" } }
+        catch { $problems += "$Exe cannot be run: $($_.Exception.Message)" }
+    }
 }
-if (-not $PythonExe -or -not (Test-Path -LiteralPath $PythonExe)) { $problems += "python.exe not found: '$PythonExe' (pass -PythonExe)" }
 else {
-    try { $v = & $PythonExe --version 2>&1; if ($LASTEXITCODE -ne 0) { $problems += "python cannot be run: $v" } }
-    catch { $problems += "python cannot be run: $($_.Exception.Message)" }
+    foreach ($d in $definitions) {
+        $p = Join-Path $RepoRoot $d.Script
+        if (-not (Test-Path -LiteralPath $p)) { $problems += "missing $p" }
+    }
+    if (-not $PythonExe -or -not (Test-Path -LiteralPath $PythonExe)) { $problems += "python.exe not found: '$PythonExe' (pass -PythonExe)" }
+    else {
+        try { $v = & $PythonExe --version 2>&1; if ($LASTEXITCODE -ne 0) { $problems += "python cannot be run: $v" } }
+        catch { $problems += "python cannot be run: $($_.Exception.Message)" }
+    }
 }
 if ($problems.Count -gt 0) {
     if ($WhatIfPreference) { $problems | ForEach-Object { Write-Warning "preflight (would fail registration): $_" } }
@@ -244,7 +266,7 @@ if (-not $WhatIfPreference) { New-Item -ItemType Directory -Force -Path (Join-Pa
 
 # ---- register -----------------------------------------------------------------------------------
 foreach ($d in $definitions) {
-    $action = New-ScheduledTaskAction -Execute $PythonExe -Argument (Get-TaskArgumentLine $d) -WorkingDirectory $RepoRoot
+    $action = New-ScheduledTaskAction -Execute $program -Argument (Get-TaskArgumentLine $d) -WorkingDirectory $RepoRoot
 
     $start = [datetime]::Today.Add([timespan]::Parse($d.At))
     $trigger = New-ScheduledTaskTrigger -Daily -At $start

@@ -48,6 +48,17 @@ foreach ($f in 'scripts\t4_refresh.py', 'scripts\t6_send.py', 'scripts\schedule\
     if (-not (Test-Path (Join-Path $source $f))) { throw "This does not look like the solution folder: $f is missing in $source" }
 }
 Ok 'solution files present'
+$exe = Join-Path $source 'bin\tableau_automation.exe'
+$packaged = Test-Path $exe
+if ($packaged) {
+    $ErrorActionPreference = 'Continue'
+    $sc = & $exe selfcheck 2>&1; $scExit = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($scExit -eq 0) { Ok 'packaged program bin\tableau_automation.exe runs on this host (no Python needed)' }
+    else { Bad "bin\tableau_automation.exe does not run on this host (antivirus? missing runtime?): $($sc -join ' | ')" }
+} else { Warn 'no bin\tableau_automation.exe in the download: the install will need Python 3.12 and PyPI' }
+$elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole('Administrators')
+if (-not $elevated) { Warn 'this PowerShell is NOT elevated: scheduled tasks of other accounts may be hidden below. Use Run as administrator.' }
 
 # ---------------------------------------------------------------- 2. legacy job
 Step '2. Legacy extract job (read-only)'
@@ -93,16 +104,21 @@ if ($roots.Count -gt 1) { Warn 'more than one legacy folder found: give -LegacyR
 
 # ---------------------------------------------------------------- 3. host
 Step '3. Host'
-$py = Get-Command python -ErrorAction SilentlyContinue
-if ($py -and $py.Source -notmatch 'WindowsApps') {
-    $v = & $py.Source --version 2>&1
-    if ($py.Source -match '\\Users\\|\\AppData\\') { Warn "python is in a user profile ($($py.Source)): the service account probably cannot run it; install Python 3.12 for all users" }
-    else { Ok "python: $v ($($py.Source))" }
-} else { Bad 'Python is not installed (the legacy job is a packaged .exe and does not need it): install Python 3.12 for all users, add to PATH' }
-if (Get-OdbcDriver -Name 'ODBC Driver 17 for SQL Server' -ErrorAction SilentlyContinue) { Ok 'ODBC Driver 17 for SQL Server' } else { Bad 'ODBC Driver 17 for SQL Server is not installed' }
+if ($packaged) { Ok 'Python and PyPI not needed (packaged program)' }
+else {
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if ($py -and $py.Source -notmatch 'WindowsApps') {
+        $v = & $py.Source --version 2>&1
+        if ($py.Source -match '\\Users\\|\\AppData\\') { Warn "python is in a user profile ($($py.Source)): the service account probably cannot run it; install Python 3.12 for all users" }
+        else { Ok "python: $v ($($py.Source))" }
+    } else { Bad 'Python is not installed and the download has no bin\tableau_automation.exe: download the folder again from GitLab (it includes bin\)' }
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $null = Invoke-WebRequest 'https://pypi.org/simple/pip/' -UseBasicParsing -TimeoutSec 10 -Method Head; Ok 'PyPI reachable (packages can be installed)' }
+    catch { Warn 'PyPI not reachable: deploy_uat.ps1 cannot install the packages; arrange a proxy or offline wheels' }
+}
+$drivers = @(Get-OdbcDriver -Platform '64-bit' -ErrorAction SilentlyContinue | Where-Object { $_.Name -in 'ODBC Driver 18 for SQL Server', 'ODBC Driver 17 for SQL Server' } | ForEach-Object Name)
+if ($drivers) { Ok "ODBC driver: $($drivers -join ', ')  (put one of them in .env CONN_DRIVER, e.g. {$($drivers[0])})" }
+else { Bad 'neither ODBC Driver 18 nor 17 for SQL Server is installed' }
 if ((Get-TimeZone).Id -eq 'Singapore Standard Time') { Ok 'time zone Singapore' } else { Warn "time zone is $((Get-TimeZone).Id); the tasks use host time, the scripts Singapore time" }
-try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $null = Invoke-WebRequest 'https://pypi.org/simple/pip/' -UseBasicParsing -TimeoutSec 10 -Method Head; Ok 'PyPI reachable (packages can be installed)' }
-catch { Warn 'PyPI not reachable: deploy_uat.ps1 cannot install the packages; arrange a proxy or offline wheels' }
 $ours = @(Get-ScheduledTask -TaskPath '\TableauAutomation\' -ErrorAction SilentlyContinue)
 if ($ours) { Warn "this solution's tasks already exist: $($ours.TaskName -join ', ')" } else { Ok 'no \TableauAutomation\ tasks yet' }
 
@@ -115,7 +131,10 @@ if ($root) {
 if ($CheckOnly) { Write-Host "`nCheck only: nothing was changed." -ForegroundColor Green; return }
 
 # ---------------------------------------------------------------- 4. copy
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole('Administrators')) { throw 'Run this in an elevated (Run as administrator) PowerShell.' }
+if (-not $elevated) { throw 'Run this in an elevated (Run as administrator) PowerShell.' }
+if ($Update -and @(Get-ScheduledTask -TaskPath '\TableauAutomation\' -ErrorAction SilentlyContinue | Where-Object State -eq 'Running')) {
+    throw 'A \TableauAutomation\ task is running (its program files are in use): run -Update again when it has finished, best before 07:50 or after 17:40'
+}
 if (-not $root) { throw 'Legacy folder not determined: run with -LegacyRoot <folder> (see the candidates above).' }
 if (-not (Test-Path $root)) { throw "Legacy root $root does not exist" }
 if ($TargetName -match '[\\/:]' -or $TargetName -in @('executables_tableau_extract', 'batch_files', 'log', 'windows_scheduler_prod', 'windows_scheduler_UAT', 'source_reference')) {
@@ -144,11 +163,15 @@ Write-Host "  $($before.files.Count) legacy file(s) fingerprinted in: $(($Legacy
 Write-Host "  (the log folder is skipped: the legacy job writes to it); $($before.tasks.Count) legacy task(s) exported"
 
 Step "5. Copy the solution into $target"
-$xd = @('.git', 'out', '.venv', '__pycache__', 'Reference', 'testdata', 'UAT_package')
+$xd = @('.git', 'out', '.venv', '__pycache__', 'Reference', 'testdata', 'UAT_package', 'build')
 $xf = @('.env', '.env.*.backup', '.env.txt', '*_checks.py', 'check_fixtures.py', 'testguard.py', 'publish_map.local.json', '*.log')
 New-Item -ItemType Directory -Force $target | Out-Null
 & robocopy $source $target /E /XD @xd /XF @xf /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE" }
+if ($packaged) {   # bin\ is replaced exactly (a file left from an older build must not stay next to the new program)
+    & robocopy (Join-Path $source 'bin') (Join-Path $target 'bin') /MIR /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "robocopy of bin\ failed with exit code $LASTEXITCODE" }
+}
 Copy-Item (Join-Path $source '.env.example') (Join-Path $target '.env.example') -Force   # /XF '.env.*' patterns must not drop it
 New-Item -ItemType Directory -Force (Join-Path $target 'out\legacy_snapshot') | Out-Null
 foreach ($k in $before.tasks.Keys) { $before.tasks[$k] | Out-File (Join-Path $target ("out\legacy_snapshot\" + ($k.Trim('\') -replace '\\', '_') + '.xml')) -Encoding utf8 }
@@ -175,6 +198,6 @@ Write-Host @"
 Next (docs\DEPLOYMENT_PROD.md):
   1. cd "$target"
   2. Create .env from .env.example (new Tableau token, NOT the legacy one; MAIL_TRANSPORT=local).
-  3. .\scripts\schedule\deploy_uat.ps1 -ServiceAccount '<service account>'   (venv, packages, DRY-RUN tasks)
+  3. .\scripts\schedule\deploy_uat.ps1 -ServiceAccount '<service account>'   (program check, DRY-RUN tasks)
 "@ -ForegroundColor Green
 exit 0
